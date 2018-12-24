@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -66,7 +66,8 @@ public:
         uint32_t sigrl_size,
         sgx_report_t *p_qe_report,
         uint8_t *p_quote,
-        uint32_t quote_size);
+        uint32_t quote_size,
+        uint16_t pce_isv_svn);
 };
 #endif
 

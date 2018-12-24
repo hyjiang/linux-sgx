@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -38,6 +38,9 @@
 #include "../Enclave3/Enclave3_u.h"
 #include "sgx_eid.h"
 #include "sgx_urts.h"
+#define __STDC_FORMAT_MACROS
+#include <inttypes.h>
+
 
 #define UNUSED(val) (void)(val)
 #define TCHAR   char
@@ -59,20 +62,21 @@ sgx_enclave_id_t e3_enclave_id = 0;
 
 void waitForKeyPress()
 {
-    uint8_t    ch;
+    char ch;
+    int temp;
     printf("\n\nHit a key....\n");
-    scanf_s("%c", &ch);
+    temp = scanf_s("%c", &ch);
+    (void) temp;
 }
 
 uint32_t load_enclaves()
 {
     uint32_t enclave_temp_no;
-    int ret, launch_token_updated;
-    sgx_launch_token_t launch_token;
+    sgx_status_t ret = SGX_ERROR_UNEXPECTED;
 
     enclave_temp_no = 0;
 
-    ret = sgx_create_enclave(ENCLAVE1_PATH, SGX_DEBUG_FLAG, &launch_token, &launch_token_updated, &e1_enclave_id, NULL);
+    ret = sgx_create_enclave(ENCLAVE1_PATH, SGX_DEBUG_FLAG, NULL, NULL, &e1_enclave_id, NULL);
     if (ret != SGX_SUCCESS) {
                 return ret;
     }
@@ -80,7 +84,7 @@ uint32_t load_enclaves()
     enclave_temp_no++;
     g_enclave_id_map.insert(std::pair<sgx_enclave_id_t, uint32_t>(e1_enclave_id, enclave_temp_no));
 
-    ret = sgx_create_enclave(ENCLAVE2_PATH, SGX_DEBUG_FLAG, &launch_token, &launch_token_updated, &e2_enclave_id, NULL);
+    ret = sgx_create_enclave(ENCLAVE2_PATH, SGX_DEBUG_FLAG, NULL, NULL, &e2_enclave_id, NULL);
     if (ret != SGX_SUCCESS) {
                 return ret;
     }
@@ -88,7 +92,7 @@ uint32_t load_enclaves()
     enclave_temp_no++;
     g_enclave_id_map.insert(std::pair<sgx_enclave_id_t, uint32_t>(e2_enclave_id, enclave_temp_no));
 
-    ret = sgx_create_enclave(ENCLAVE3_PATH, SGX_DEBUG_FLAG, &launch_token, &launch_token_updated, &e3_enclave_id, NULL);
+    ret = sgx_create_enclave(ENCLAVE3_PATH, SGX_DEBUG_FLAG, NULL, NULL, &e3_enclave_id, NULL);
     if (ret != SGX_SUCCESS) {
                 return ret;
     }
@@ -114,10 +118,10 @@ int _tmain(int argc, _TCHAR* argv[])
         printf("\nLoad Enclave Failure");
     }
 
-    printf("\nAvaliable Enclaves");
-    printf("\nEnclave1 - EnclaveID %llx",e1_enclave_id);
-    printf("\nEnclave2 - EnclaveID %llx",e2_enclave_id);
-    printf("\nEnclave3 - EnclaveID %llx",e3_enclave_id);
+    printf("\nAvailable Enclaves");
+    printf("\nEnclave1 - EnclaveID %" PRIx64, e1_enclave_id);
+    printf("\nEnclave2 - EnclaveID %" PRIx64, e2_enclave_id);
+    printf("\nEnclave3 - EnclaveID %" PRIx64, e3_enclave_id);
     
     do
     {
@@ -431,10 +435,7 @@ int _tmain(int argc, _TCHAR* argv[])
             }
         }
 
-#pragma warning (push)
-#pragma warning (disable : 4127)    
     }while(0);
-#pragma warning (pop)
 
     sgx_destroy_enclave(e1_enclave_id);
     sgx_destroy_enclave(e2_enclave_id);

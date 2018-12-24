@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -78,7 +78,8 @@ typedef struct _quote_t
     uint16_t            sign_type;      /* 2   */
     sgx_epid_group_id_t epid_group_id;  /* 4   */
     sgx_isv_svn_t       qe_svn;         /* 8   */
-    uint8_t             reserved[6];    /* 10  */
+    sgx_isv_svn_t       pce_svn;        /* 10  */
+    uint32_t            xeid;           /* 12  */
     sgx_basename_t      basename;       /* 16  */
     sgx_report_body_t   report_body;    /* 48  */
     uint32_t            signature_len;  /* 432 */

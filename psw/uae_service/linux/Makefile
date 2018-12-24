@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+# Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -51,30 +51,20 @@ INCLUDE += -I$(LINUX_PSW_DIR)/ae/common \
            -I$(LINUX_PSW_DIR)/ae/inc/internal    \
            -I$(LINUX_SDK_DIR)/tseal
 
-INCLUDE += -I$(LINUX_EXTERNAL_DIR)/epid/inc \
+INCLUDE += -I$(LINUX_EXTERNAL_DIR)/epid-sdk    \
            -I$(IPC_COMMON_INC_DIR) \
            -I$(UAE_INC_DIR) \
            -I$(IPC_COMMON_PROTO_DIR) \
            -I$(LINUX_PSW_DIR)/ae/aesm_service/source
 
-CXXFLAGS += -fPIC -Werror
-PROTPBUF_CXXFLAGS := -fstack-protector -fPIC -Wall -Werror
-ifdef DEBUG
-	PROTPBUF_CXXFLAGS += -ggdb -DDEBUG -UNDEBUG
-else
-	PROTPBUF_CXXFLAGS += -O2 -UDEBUG -DNDEBUG
-endif
-ifeq ($(ARCH), x86)
-	PROTPBUF_CXXFLAGS += -m32
-else
-	PROTPBUF_CXXFLAGS += -m64
-endif
+CXXFLAGS += -fPIC -Werror -Wno-unused-parameter -g -DPROTOBUF_INLINE_NOT_IN_HEADERS=0
 
 EXTERNAL_LIB += -lprotobuf 
  
-vpath %.cpp .. $(COMMON_DIR)/src  $(IPC_COMMON_SRC_DIR) $(IPC_COMMON_PROTO_DIR) $(UAE_SRC_DIR) $(COMMON_DIR)/src $(AE_COMMON_DIR)
+vpath %.cpp .. $(COMMON_DIR)/src  $(IPC_COMMON_SRC_DIR) $(IPC_COMMON_PROTO_DIR) $(UAE_SRC_DIR) $(AE_COMMON_DIR)
+vpath %.c   $(COMMON_DIR)/src
 
-
+C_SRC   := se_trace.c
 
 IPC_SRC  := AECloseSessionRequest.cpp    \
              AEGetQuoteResponse.cpp \
@@ -93,6 +83,16 @@ IPC_SRC  := AECloseSessionRequest.cpp    \
              AEReportAttestationResponse.cpp \
              ProtobufSerializer.cpp \
              AEGetLaunchTokenRequest.cpp  \
+             AEGetWhiteListSizeRequest.cpp \
+             AEGetWhiteListSizeResponse.cpp \
+             AEGetWhiteListRequest.cpp \
+             AEGetWhiteListResponse.cpp \
+             AESGXGetExtendedEpidGroupIdRequest.cpp \
+             AESGXGetExtendedEpidGroupIdResponse.cpp \
+             AESGXSwitchExtendedEpidGroupRequest.cpp \
+             AESGXSwitchExtendedEpidGroupResponse.cpp \
+             AESGXRegisterRequest.cpp \
+             AESGXRegisterResponse.cpp \
              SocketTransporter.cpp \
              AEGetLaunchTokenResponse.cpp  \
              UnixCommunicationSocket.cpp \
@@ -104,8 +104,7 @@ IPC_SRC  := AECloseSessionRequest.cpp    \
 PROTOBUF_SRC  :=  messages.pb.cc
 
 
-SRC :=       AEInternalServicesProvider.cpp \
-             AEServicesImpl.cpp \
+SRC :=       AEServicesImpl.cpp \
              AEServicesProvider.cpp \
              tae_ocall_api.cpp \
              uae_api.cpp \
@@ -114,40 +113,65 @@ SRC :=       AEInternalServicesProvider.cpp \
              uae_service_version.cpp \
              uae_service_assert.cpp
 
-OBJ := $(SRC:.cpp=.o) $(IPC_SRC:.cpp=.o)  $(PROTOBUF_SRC:.cc=.o) 
+OBJ := $(C_SRC:.c=.o) $(SRC:.cpp=.o) $(IPC_SRC:.cpp=.o)  $(PROTOBUF_SRC:.cc=.o) 
 
-LDUFLAGS:= -pthread -L$(BUILD_DIR)
+LDUFLAGS:= -pthread $(COMMON_LDFLAGS)
+LDUFLAGS += -Wl,--version-script=uae_service.lds -Wl,--gc-sections
 
-DLLNAME  = libsgx_uae_service.so
+LIBNAME  = libsgx_uae_service.so
+LIBNAME_DEBUG  = libsgx_uae_service.so.debug
 
 
 .PHONY: all
-all:  install_dll
+all:  install_lib
  
 
-.PHONY: install_dll
-install_dll: $(DLLNAME)| $(BUILD_DIR)
-	@$(CP) $^ $|
+.PHONY: install_lib
+install_lib: $(LIBNAME) $(LIBNAME_DEBUG) | $(BUILD_DIR)
+	@$(CP) $(LIBNAME) $|
+ifndef DEBUG
+	@$(CP) $(LIBNAME_DEBUG) $|
+endif
 
-$(DLLNAME): $(OBJ)
+$(LIBNAME): $(OBJ)
 	$(CXX) $(CXXFLAGS) $(OBJ) -shared $(LDUFLAGS) $(EXTERNAL_LIB) -o $@
+$(LIBNAME_DEBUG): $(LIBNAME)
+	((test -f $(LIBNAME_DEBUG)) || $(MAKE) separate_debug_info)
 
-%.o :%.cpp PROTPBUF
+.PHONY: separate_debug_info
+separate_debug_info:
+ifndef DEBUG
+	$(CP) $(LIBNAME) $(LIBNAME).orig
+	$(OBJCOPY) --only-keep-debug $(LIBNAME) $(LIBNAME_DEBUG)
+	$(STRIP) -g $(LIBNAME)
+	$(OBJCOPY) --add-gnu-debuglink=$(LIBNAME_DEBUG) $(LIBNAME)
+endif
+
+$(IPC_SRC:.cpp=.o) : $(IPC_COMMON_PROTO_DIR)/messages.pb.cc
+AEServicesImpl.o : $(IPC_COMMON_PROTO_DIR)/messages.pb.cc
+
+messages.pb.o : $(IPC_COMMON_PROTO_DIR)/messages.pb.cc
+	$(CXX) $(filter-out -Wshadow, $(CXXFLAGS)) -c $< -o $@
+%.o :%.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDE) -c $< -o $@
+%.o: %.c
+	$(CC) $(CFLAGS) $(INCLUDE) -Werror -fPIC -c $< -o $@
+
 
 $(BUILD_DIR):
 	@$(MKDIR) $@
 
-.PHONY: PROTPBUF
-PROTPBUF:
+$(IPC_COMMON_PROTO_DIR)/messages.pb.cc: $(IPC_COMMON_PROTO_DIR)/messages.proto 
 	$(MAKE) -C $(IPC_COMMON_PROTO_DIR) 
-	(test -f messages.pb.o) || ($(CXX) $(PROTPBUF_CXXFLAGS) -c $(IPC_COMMON_PROTO_DIR)/messages.pb.cc -o messages.pb.o)
 
 .PHONY: clean
 clean:
 	$(MAKE) -C $(IPC_COMMON_PROTO_DIR) clean
-	@$(RM) $(OBJ)
-	@$(RM) $(DLLNAME) $(BUILD_DIR)/$(DLLNAME) 
+	@$(RM) $(OBJ) $(LIBNAME).orig
+	@$(RM) $(LIBNAME) $(BUILD_DIR)/$(LIBNAME) 
+	@$(RM) $(LIBNAME_DEBUG) $(BUILD_DIR)/$(LIBNAME_DEBUG)
 
 .PHONY: rebuild
-rebuild: clean all
+rebuild:
+	$(MAKE) clean
+	$(MAKE) all

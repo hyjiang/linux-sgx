@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+# Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -39,8 +39,8 @@ CXXFLAGS += -DDISABLE_TRACE
 CFLAGS += -DDISABLE_TRACE
 endif
 
-CXXFLAGS += -fPIC -DSE_SIM -Werror
-CFLAGS   += -fPIC -DSE_SIM -Werror
+CXXFLAGS += -fPIC -DSE_SIM -Werror -g
+CFLAGS   += -fPIC -DSE_SIM -Werror -g
 
 CPPFLAGS += $(ADDED_INC) #for ubuntu 11 and later version
 CPPFLAGS += -I$(COMMON_DIR)/inc                \
@@ -59,10 +59,14 @@ DIR1 := $(LINUX_PSW_DIR)/urts/
 DIR2 := $(LINUX_PSW_DIR)/urts/linux/
 DIR3 := $(LINUX_PSW_DIR)/urts/parser/
 DIR4 := ../
+DIR5 := $(LINUX_PSW_DIR)/../common/src/linux
+DIR6 := $(LINUX_PSW_DIR)/../common/src
+
+# uswitchless DIR
+DIR7 := $(LINUX_PSW_DIR)/uswitchless/
 
 LDFLAGS += -L$(COMMON_DIR)/se_wrapper \
            -L$(SIM_DIR)/uae_service_sim/linux
-
 LDFLAGS += -L$(VTUNE_DIR)/sdk/src/ittnotify/ -littnotify -ldl
 
 OBJ1 := enclave.o         \
@@ -81,15 +85,19 @@ OBJ2 := urts.o             \
         misc.o             \
         sig_handler.o      \
         debugger_support.o \
-        get_thread_id.o
+        get_thread_id.o    \
+        urts_trim.o        \
+        urts_emodpr.o
 
 OBJ3 := section.o \
         elfparser.o
 
-OBJ4 := enter_enclave.o
+OBJ4 := enter_enclave.o \
+        xsave_gnu.o
 
 OBJ5 := enclave_creator_sim.o \
-        cpusvn_util.o
+        cpusvn_util.o         \
+        crypto_evp_digest.o
 
 OBJ6 := $(SIM_DIR)/driver_api/driver_api.o \
         $(SIM_DIR)/assembly/linux/lowlib.o \
@@ -99,39 +107,64 @@ OBJ6 := $(SIM_DIR)/driver_api/driver_api.o \
         $(SIM_DIR)/uinst/linux/set_tls.o   \
         $(SIM_DIR)/uinst/linux/restore_tls.o
 
+# uswitchless objects taken from psw\uswitchless (DIR7) and from common\src (DIR6)
+OBJ7 := sgx_ecall_switchless_untrusted.o \
+		sl_fcall_mngr_untrusted.o \
+		sl_siglines_untrusted.o \
+		sl_workers_untrusted.o \
+		sl_uswitchless_untrusted.o \
+		sl_fcall_mngr_common.o \
+		sl_memlog_common.o \
+		sl_once_common.o \
+		sl_siglines_common.o
+		
 CPP_OBJ := $(OBJ1) $(OBJ2) $(OBJ3) $(OBJ5)
-OBJ     := $(CPP_OBJ) $(OBJ4)
+C_OBJ 	:= $(OBJ7)
+OBJ     := $(CPP_OBJ) $(C_OBJ) $(OBJ4)
 
-vpath %.cpp .:$(DIR1):$(DIR2):$(DIR3):$(DIR4)
+vpath %.cpp .:$(DIR1):$(DIR2):$(DIR3):$(DIR4):$(DIR6)
+vpath %.S   .:$(DIR2):$(DIR5)
+vpath %.c .:$(DIR7):$(DIR6)
 
-LDFLAGS +=  -L$(LINUX_EXTERNAL_DIR)/crypto_px
+LDFLAGS += $(COMMON_LDFLAGS) -Wl,--version-script=$(LINUX_PSW_DIR)/urts/linux/urts.lds
 
 LIBURTSSIM_SHARED := libsgx_urts_sim.so
+LIBURTSSIM_DEBUG := libsgx_urts_sim.so.debug
 LIBURTS_DEPLOY := libsgx_urts_deploy.so
 
-LDLIBS  += -lwrapper -lcrypto_px -Wl,-Bdynamic -Wl,-Bsymbolic -lsgx_uae_service_sim
+LDLIBS  += -lwrapper -lcrypto -Wl,-Bdynamic -Wl,-Bsymbolic -lsgx_uae_service_sim
 SONAME = $(LIBURTSSIM_SHARED)
 
 .PHONY: all
-all: $(LIBURTSSIM_SHARED) $(LIBURTS_DEPLOY)| $(BUILD_DIR)
-	$(CP) $^ $|
+all: $(LIBURTSSIM_SHARED) $(LIBURTSSIM_DEBUG) $(LIBURTS_DEPLOY)| $(BUILD_DIR)
+	$(CP) $(LIBURTSSIM_SHARED) $|
+	$(CP) $(LIBURTS_DEPLOY) $|
+ifndef DEBUG
+	$(CP) $(LIBURTSSIM_DEBUG) $|
+endif
 
-
-$(LIBURTSSIM_SHARED): simasm uinst driver_api wrapper uae_service_sim $(OBJ) $(OBJ6) -lcrypto_px ittnotify
+$(LIBURTSSIM_SHARED): simasm uinst driver_api wrapper uae_service_sim $(OBJ) $(OBJ6) ittnotify
 	$(CXX) $(CXXFLAGS) -shared -Wl,-soname=$(SONAME) $(OBJ) $(OBJ6) $(LDFLAGS) $(LDLIBS) -o $@
 
+$(LIBURTSSIM_DEBUG): $(LIBURTSSIM_SHARED)
+ifndef DEBUG
+	$(CP) $(LIBURTSSIM_SHARED) $(LIBURTSSIM_SHARED).orig
+	$(OBJCOPY) --only-keep-debug $(LIBURTSSIM_SHARED) $(LIBURTSSIM_DEBUG)
+	$(STRIP) -g $(LIBURTSSIM_SHARED)
+	$(OBJCOPY)  --add-gnu-debuglink=$(LIBURTSSIM_DEBUG) $(LIBURTSSIM_SHARED)
+endif
 
 $(BUILD_DIR):
 	@$(MKDIR) $@
 
-$(OBJ4): %.o: $(DIR2)/%.S
+$(OBJ4): %.o: %.S
 	$(CC) -c $(CFLAGS) $(CPPFLAGS) $< -o $@
 
 $(CPP_OBJ): %.o: %.cpp
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $< -o $@
 
--lcrypto_px:
-	$(MAKE) -C $(LINUX_EXTERNAL_DIR)/crypto_px
+$(C_OBJ): %.o: %.c
+	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $< -o $@
 
 .PHONY: wrapper
 wrapper:
@@ -162,12 +195,11 @@ $(LIBURTS_DEPLOY):../urts_deploy.c
 
 .PHONY: clean
 clean::
-	@$(RM) *.o $(LIBURTSSIM_SHARED) $(LIBURTS_DEPLOY) 
-	@$(RM) $(BUILD_DIR)/$(LIBURTSSIM_SHARED) $(BUILD_DIR)/$(LIBURTS_DEPLOY)
+	@$(RM) *.o $(LIBURTSSIM_SHARED) $(LIBURTS_DEPLOY) $(LIBURTSSIM_DEBUG) $(LIBURTSSIM_SHARED).orig 
+	@$(RM) $(BUILD_DIR)/$(LIBURTSSIM_SHARED) $(BUILD_DIR)/$(LIBURTS_DEPLOY) $(BUILD_DIR)/$(LIBURTSSIM_DEBUG)
 	$(MAKE) -C $(COMMON_DIR)/se_wrapper                                    clean
 	$(MAKE) -C $(SIM_DIR)/driver_api/                                      clean
 	$(MAKE) -C $(SIM_DIR)/assembly/                                        clean
 	$(MAKE) -C $(SIM_DIR)/uinst/                                           clean
 	$(MAKE) -C $(SIM_DIR)/uae_service_sim/linux                            clean
-	$(MAKE) -C $(LINUX_EXTERNAL_DIR)/crypto_px                             clean
 	$(MAKE) -C $(VTUNE_DIR)/sdk/src/ittnotify/                             clean

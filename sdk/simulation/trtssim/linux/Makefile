@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+# Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -34,14 +34,14 @@ include ../../../../buildenv.mk
 CPPFLAGS += -I$(COMMON_DIR)/inc/         \
             -I$(COMMON_DIR)/inc/tlibc/   \
             -I$(COMMON_DIR)/inc/internal \
-            -I$(LINUX_SDK_DIR)/trts/
+            -I$(LINUX_SDK_DIR)/trts/     \
+            -I$(LINUX_SDK_DIR)/tlibcxx/include
 
 CFLAGS   += $(ENCLAVE_CFLAGS)
 ASFLAGS  := -DSE_SIM -Werror $(CFLAGS)
 CFLAGS   += -DSE_SIM -Werror -fasynchronous-unwind-tables
 CXXFLAGS += -DSE_SIM -Werror $(ENCLAVE_CXXFLAGS)\
             -fno-exceptions -fno-rtti
-
 
 SIM_DIR    := $(CUR_DIR)/../..
 # The sources from tRTS - shared by both Sim/HW mode
@@ -56,15 +56,22 @@ TLS_DIR    := $(SIM_DIR)/uinst/linux/
 TLDR_DIR   := $(LINUX_SDK_DIR)/trts/linux/
 # Support for platform dependent 'setcontext'
 SC_DIR     := $(LINUX_SDK_DIR)/trts/linux/$(ARCH)/
+# The source for xsave/xrstor
+XSAVE_DIR     := $(COMMON_DIR)/src/linux/
 
-TRTS_OBJS   := init_enclave.o \
+TRTS1_OBJS  := init_enclave.o \
                trts.o         \
                trts_ecall.o   \
                trts_ocall.o   \
                trts_util.o    \
                trts_veh.o     \
                trts_xsave.o   \
-               init_optimized_lib.o
+               init_optimized_lib.o \
+               trts_emodpr.o  \
+               trts_switchless.o \
+               trts_add_trim.o
+TRTS2_OBJS  := trts_nsp.o
+TRTS_OBJS := $(TRTS1_OBJS) $(TRTS2_OBJS)
 
 TINST_OBJS   := t_instructions.o \
                 deriv.o
@@ -75,7 +82,8 @@ TLS_OBJS     := get_tcs.o \
                 restore_tls.o
 
 TLDR_ASM_OBJS := trts_pic.o \
-                metadata_sec.o
+                metadata_sec.o \
+                xsave_gnu.o
 
 TLDR_C_OBJS  := elf_parser.o  \
                 global_init.o \
@@ -88,7 +96,7 @@ SC_OBJ := setcontext.o
 LIBTRTS := libsgx_trts_sim.a
 
 vpath %.cpp $(TRTS_DIR):$(TINST_DIR)
-vpath %.S   $(LOWLIB_DIR):$(TLDR_DIR):$(SC_DIR)
+vpath %.S   $(LOWLIB_DIR):$(TLDR_DIR):$(SC_DIR):$(XSAVE_DIR)
 vpath %.c   $(TLS_DIR):$(TLDR_DIR)
 
 # ------------------------------------------------------------
@@ -100,8 +108,11 @@ $(LIBTRTS): $(TRTS_OBJS) $(TINST_OBJS) $(LOWLIB_OBJS) $(TLS_OBJS) $(TLDR_OBJS) $
 	$(AR) rcsD $@ $(TRTS_OBJS) $(TINST_OBJS) $(LOWLIB_OBJS) $(TLS_OBJS) $(TLDR_OBJS) $(SC_OBJ)
 
 # ------------------------------------------------------------
-$(TRTS_OBJS):    CPPFLAGS += -I$(COMMON_DIR)/inc/tlibc \
+$(TRTS1_OBJS):    CPPFLAGS += -I$(COMMON_DIR)/inc/tlibc \
                              -I$(SIM_DIR)/tinst/
+$(TRTS2_OBJS): %.o:%.cpp
+	$(CXX) -c $(filter-out -fstack-protector-strong, $(CXXFLAGS)) -I$(SIM_DIR)/tinst/ $(CPPFLAGS) $< -o $@
+
 
 # Explicitly disable optimization for tRTS simulation library,
 # since the '_SE3' function has assumptions on stack layout.
@@ -131,4 +142,6 @@ clean:
 	@$(RM) *.o $(LIBTRTS) $(BUILD_DIR)/$(LIBTRTS)
 
 .PHONY: rebuild
-rebuild: clean all
+rebuild:
+	$(MAKE) clean
+	$(MAKE) all

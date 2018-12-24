@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -29,10 +29,14 @@
  *
  */
 
+// This sample is confined to the communication between a SGX client platform
+// and an ISV Application Server. 
+
 
 
 #include <stdio.h>
 #include <limits.h>
+#include <unistd.h>
 // Needed for definition of remote attestation messages.
 #include "remote_attestation_result.h"
 
@@ -47,6 +51,9 @@
 
 // Needed to create enclave and do ecall.
 #include "sgx_urts.h"
+
+// Needed to query extended epid group id.
+#include "sgx_uae_service.h"
 
 #include "service_provider.h"
 
@@ -64,7 +71,7 @@
 
 uint8_t* msg1_samples[] = { msg1_sample1, msg1_sample2 };
 uint8_t* msg2_samples[] = { msg2_sample1, msg2_sample2 };
-uint8_t* msg3_samples[MSG3_BODY_SIZE] = { msg3_sample1, msg3_sample2 };
+uint8_t* msg3_samples[] = { msg3_sample1, msg3_sample2 };
 uint8_t* attestation_msg_samples[] =
     { attestation_msg_sample1, attestation_msg_sample2};
 
@@ -116,6 +123,10 @@ void PRINT_ATTESTATION_SERVICE_RESPONSE(
         fprintf(file, "MSG2 spid - ");
         PRINT_BYTE_ARRAY(file, &(p_msg2_body->spid), sizeof(p_msg2_body->spid));
 
+        fprintf(file, "MSG2 quote_type : %hx\n", p_msg2_body->quote_type);
+
+        fprintf(file, "MSG2 kdf_id : %hx\n", p_msg2_body->kdf_id);
+
         fprintf(file, "MSG2 sign_gb_ga - ");
         PRINT_BYTE_ARRAY(file, &(p_msg2_body->sign_gb_ga),
                          sizeof(p_msg2_body->sign_gb_ga));
@@ -154,19 +165,21 @@ void PRINT_ATTESTATION_SERVICE_RESPONSE(
 
 // This sample code doesn't have any recovery/retry mechanisms for the remote
 // attestation. Since the enclave can be lost due S3 transitions, apps
-// susceptible to S3 transtions should have logic to restart attestation in
-// these scenenarios.
+// susceptible to S3 transitions should have logic to restart attestation in
+// these scenarios.
 #define _T(x) x
 int main(int argc, char* argv[])
 {
     int ret = 0;
+    ra_samp_request_header_t *p_msg0_full = NULL;
+    ra_samp_response_header_t *p_msg0_resp_full = NULL;
     ra_samp_request_header_t *p_msg1_full = NULL;
     ra_samp_response_header_t *p_msg2_full = NULL;
     sgx_ra_msg3_t *p_msg3 = NULL;
     ra_samp_response_header_t* p_att_result_msg_full = NULL;
     sgx_enclave_id_t enclave_id = 0;
     int enclave_lost_retry_time = 1;
-    int busy_retry_time = 2;
+    int busy_retry_time = 4;
     sgx_ra_context_t context = INT_MAX;
     sgx_status_t status = SGX_SUCCESS;
     ra_samp_request_header_t* p_msg3_full = NULL;
@@ -204,28 +217,72 @@ int main(int argc, char* argv[])
         }
     }
 
-    // Remote attestaton will be initiated the ISV server challenges the ISV
+    // Preparation for remote attestation by configuring extended epid group id.
+    {
+        uint32_t extended_epid_group_id = 0;
+        ret = sgx_get_extended_epid_group_id(&extended_epid_group_id);
+        if (SGX_SUCCESS != ret)
+        {
+            ret = -1;
+            fprintf(OUTPUT, "\nError, call sgx_get_extended_epid_group_id fail [%s].",
+                __FUNCTION__);
+            return ret;
+        }
+        fprintf(OUTPUT, "\nCall sgx_get_extended_epid_group_id success.");
+
+        p_msg0_full = (ra_samp_request_header_t*)
+            malloc(sizeof(ra_samp_request_header_t)
+            +sizeof(uint32_t));
+        if (NULL == p_msg0_full)
+        {
+            ret = -1;
+            goto CLEANUP;
+        }
+        p_msg0_full->type = TYPE_RA_MSG0;
+        p_msg0_full->size = sizeof(uint32_t);
+
+        *(uint32_t*)((uint8_t*)p_msg0_full + sizeof(ra_samp_request_header_t)) = extended_epid_group_id;
+        {
+
+            fprintf(OUTPUT, "\nMSG0 body generated -\n");
+
+            PRINT_BYTE_ARRAY(OUTPUT, p_msg0_full->body, p_msg0_full->size);
+
+        }
+        // The ISV application sends msg0 to the SP.
+        // The ISV decides whether to support this extended epid group id.
+        fprintf(OUTPUT, "\nSending msg0 to remote attestation service provider.\n");
+
+        ret = ra_network_send_receive("http://SampleServiceProvider.intel.com/",
+            p_msg0_full,
+            &p_msg0_resp_full);
+        if (ret != 0)
+        {
+            fprintf(OUTPUT, "\nError, ra_network_send_receive for msg0 failed "
+                "[%s].", __FUNCTION__);
+            goto CLEANUP;
+        }
+        fprintf(OUTPUT, "\nSent MSG0 to remote attestation service.\n");
+    }
+    // Remote attestation will be initiated the ISV server challenges the ISV
     // app or if the ISV app detects it doesn't have the credentials
     // (shared secret) from a previous attestation required for secure
     // communication with the server.
     {
         // ISV application creates the ISV enclave.
-        int launch_token_update = 0;
-        sgx_launch_token_t launch_token = {0};
-        memset(&launch_token, 0, sizeof(sgx_launch_token_t));
         do
         {
             ret = sgx_create_enclave(_T(ENCLAVE_PATH),
                                      SGX_DEBUG_FLAG,
-                                     &launch_token,
-                                     &launch_token_update,
+                                     NULL,
+                                     NULL,
                                      &enclave_id, NULL);
             if(SGX_SUCCESS != ret)
             {
                 ret = -1;
                 fprintf(OUTPUT, "\nError, call sgx_create_enclave fail [%s].",
                         __FUNCTION__);
-                return ret;
+                goto CLEANUP;
             }
             fprintf(OUTPUT, "\nCall sgx_create_enclave success.");
 
@@ -261,6 +318,7 @@ int main(int argc, char* argv[])
             ret = sgx_ra_get_msg1(context, enclave_id, sgx_ra_get_ga,
                                   (sgx_ra_msg1_t*)((uint8_t*)p_msg1_full
                                   + sizeof(ra_samp_request_header_t)));
+            sleep(3); // Wait 3s between retries
         } while (SGX_ERROR_BUSY == ret && busy_retry_time--);
         if(SGX_SUCCESS != ret)
         {
@@ -332,7 +390,7 @@ int main(int argc, char* argv[])
                          msg2_full_size);
 
                 PRINT_BYTE_ARRAY(OUTPUT, p_msg2_full,
-                                 sizeof(ra_samp_response_header_t)
+                                 (uint32_t)sizeof(ra_samp_response_header_t)
                                  + p_msg2_full->size);
             }
             else
@@ -364,7 +422,7 @@ int main(int argc, char* argv[])
             fprintf(OUTPUT, "\nSent MSG1 to remote attestation service "
                             "provider. Received the following MSG2:\n");
             PRINT_BYTE_ARRAY(OUTPUT, p_msg2_full,
-                             sizeof(ra_samp_response_header_t)
+                             (uint32_t)sizeof(ra_samp_response_header_t)
                              + p_msg2_full->size);
 
             fprintf(OUTPUT, "\nA more descriptive representation of MSG2:\n");
@@ -376,14 +434,16 @@ int main(int argc, char* argv[])
                 ra_samp_response_header_t* precomputed_msg2 =
                     (ra_samp_response_header_t *)
                     msg2_samples[GET_VERIFICATION_ARRAY_INDEX()];
-                if(memcmp( precomputed_msg2, p_msg2_full,
-                   sizeof(ra_samp_response_header_t) + p_msg2_full->size))
+                if(MSG2_BODY_SIZE !=
+                    sizeof(ra_samp_response_header_t) + p_msg2_full->size ||
+                    memcmp( precomputed_msg2, p_msg2_full,
+                        sizeof(ra_samp_response_header_t) + p_msg2_full->size))
                 {
                     fprintf(OUTPUT, "\nVerification ERROR. Our precomputed "
                                     "value for MSG2 does NOT match.\n");
                     fprintf(OUTPUT, "\nPrecomputed value for MSG2:\n");
                     PRINT_BYTE_ARRAY(OUTPUT, precomputed_msg2,
-                                     sizeof(ra_samp_response_header_t)
+                                     (uint32_t)sizeof(ra_samp_response_header_t)
                                      + precomputed_msg2->size);
                     fprintf(OUTPUT, "\nA more descriptive representation "
                                     "of precomputed value for MSG2:\n");
@@ -514,7 +574,8 @@ int main(int argc, char* argv[])
                             "result message back\n.");
             if( VERIFICATION_INDEX_IS_VALID() )
             {
-                if(memcmp(p_att_result_msg_full->body,
+                if(ATTESTATION_MSG_BODY_SIZE != p_att_result_msg_full->size ||
+                    memcmp(p_att_result_msg_full->body,
                         attestation_msg_samples[GET_VERIFICATION_ARRAY_INDEX()],
                         p_att_result_msg_full->size) )
                 {
@@ -524,7 +585,7 @@ int main(int argc, char* argv[])
                     fprintf(OUTPUT, "\nEXPECTED ATTESTATION RESULT -");
                     PRINT_BYTE_ARRAY(OUTPUT,
                         attestation_msg_samples[GET_VERIFICATION_ARRAY_INDEX()],
-                        p_att_result_msg_full->size);
+                        ATTESTATION_MSG_BODY_SIZE);
                 }
             }
         }
@@ -566,7 +627,9 @@ int main(int argc, char* argv[])
 
         bool attestation_passed = true;
         // Check the attestation result for pass or fail.
-        // @TODO:  Check the status.  This is ISV defined.
+        // Whether attestation passes or fails is a decision made by the ISV Server.
+        // When the ISV server decides to trust the enclave, then it will return success.
+        // When the ISV server decided to not trust the enclave, then it will return failure.
         if(0 != p_att_result_msg_full->status[0]
            || 0 != p_att_result_msg_full->status[1])
         {
@@ -575,13 +638,20 @@ int main(int argc, char* argv[])
             attestation_passed = false;
         }
 
-        // the SGX blob analysis API. The ISV will take action based on the
-        // update_info. (upgrade PSW or uCode), the second param should be 1 if
-        // the attestation failed, otherwise should be 0.
+        // The attestation result message should contain a field for the Platform
+        // Info Blob (PIB).  The PIB is returned by attestation server in the attestation report.
+        // It is not returned in all cases, but when it is, the ISV app
+        // should pass it to the blob analysis API called sgx_report_attestation_status()
+        // along with the trust decision from the ISV server.
+        // The ISV application will take action based on the update_info.
+        // returned in update_info by the API.  
+        // This call is stubbed out for the sample.
+        // 
         // sgx_update_info_bit_t update_info;
         // ret = sgx_report_attestation_status(
         //     &p_att_result_msg_body->platform_info_blob,
         //     attestation_passed ? 0 : 1, &update_info);
+
         // Get the shared secret sent by the server using SK (if attestation
         // passed)
         if(attestation_passed)
@@ -630,13 +700,15 @@ CLEANUP:
     sgx_destroy_enclave(enclave_id);
 
 
+    ra_free_network_response_buffer(p_msg0_resp_full);
     ra_free_network_response_buffer(p_msg2_full);
     ra_free_network_response_buffer(p_att_result_msg_full);
 
-    // p_msg3 is malloc'd by the untrused KE library. App needs to free.
+    // p_msg3 is malloc'd by the untrusted KE library. App needs to free.
     SAFE_FREE(p_msg3);
     SAFE_FREE(p_msg3_full);
     SAFE_FREE(p_msg1_full);
+    SAFE_FREE(p_msg0_full);
     printf("\nEnter a character before exit ...\n");
     getchar();
     return ret;

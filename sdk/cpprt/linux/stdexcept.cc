@@ -31,7 +31,7 @@
 #include <typeinfo>
 #include "se_cdefs.h"
 
-SGX_ACCESS_VERSION(tstdcxx, 5)
+SGX_ACCESS_VERSION(tcxx, 5)
 
 namespace std {
 
@@ -90,6 +90,19 @@ bad_typeid& bad_typeid::operator=(const bad_typeid &__rhs) throw()
 const char* bad_typeid::what() const throw()
 {
 	return "std::bad_typeid";
+}
+
+bad_array_new_length::bad_array_new_length() throw() {}
+bad_array_new_length::~bad_array_new_length() {}
+bad_array_new_length::bad_array_new_length(const bad_array_new_length&) throw() {}
+bad_array_new_length& bad_array_new_length::operator=(const bad_array_new_length&) throw()
+{
+        return *this;
+}
+
+const char* bad_array_new_length::what() const throw()
+{
+        return "std::bad_array_new_length";
 }
 
 } // namespace std

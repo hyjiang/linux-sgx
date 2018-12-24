@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -33,6 +33,7 @@
 #define _PLATFORM_INFO_BLOB_H_
 
 #include <stdint.h>
+#include "aeerror.h"
 #include "epid_pve_type.h"
 #include "sgx_tcrypto.h"
 
@@ -55,6 +56,7 @@ const uint8_t QE_EPID_GROUP_OUT_OF_DATE = 0x04;
 /* Masks for sgx_tcb_evaluation_flags*/
 const uint16_t QUOTE_CPUSVN_OUT_OF_DATE = 0x0001;
 const uint16_t QUOTE_ISVSVN_QE_OUT_OF_DATE = 0x0002;
+const uint16_t QUOTE_ISVSVN_PCE_OUT_OF_DATE = 0x0004;
 
 /* Masks for sgx_pse_evaluation_flags
    PS_SEC_PROP_DESC.PSE_ISVSVN is out of date*/
@@ -81,8 +83,8 @@ typedef struct _platform_info_blob_wrapper_t
         tcb_psvn_t latest_equivalent_tcb_psvn;
         pse_isvsvn_t latest_pse_isvsvn;
         psda_svn_t latest_psda_svn;
-        GroupID performance_rekey_gid;
-        GroupID gid;
+        uint32_t xeid;
+        GroupId gid;
         sgx_ec256_signature_t signature;
     } platform_info_blob;
 } platform_info_blob_wrapper_t;

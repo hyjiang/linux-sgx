@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -33,6 +33,7 @@
 #include "sgx_tkey_exchange.h"
 #include "sgx_trts.h"
 #include "sgx_utils.h"
+#include "sgx_lfence.h"
 #include "ecp_interface.h"
 #include "util.h"
 #include "string.h"
@@ -77,12 +78,16 @@ typedef struct _ra_db_item_t
     sgx_target_info_t           qe_target; //to verify quote report
     ra_state                    state;
     sgx_spinlock_t              item_lock;
+    uintptr_t                   derive_key_cb;
 }ra_db_item_t;
 
 #pragma pack(pop)
 
 static simple_vector g_ra_db = {0, 0, NULL};
-static sgx_spinlock_t g_ra_db_lock;
+static sgx_spinlock_t g_ra_db_lock = SGX_SPINLOCK_INITIALIZER;
+static uintptr_t g_kdf_cookie = 0;
+#define ENC_KDF_POINTER(x)  (uintptr_t)(x) ^ g_kdf_cookie
+#define DEC_KDF_POINTER(x)  (sgx_ra_derive_secret_keys_t)((x) ^ g_kdf_cookie)
 
 extern "C" sgx_status_t sgx_ra_get_ga(
     sgx_ra_context_t context,
@@ -92,8 +97,13 @@ extern "C" sgx_status_t sgx_ra_get_ga(
     if(vector_size(&g_ra_db) <= context||!g_a)
         return SGX_ERROR_INVALID_PARAMETER;
     ra_db_item_t* item = NULL;
-    if(0 != vector_get(&g_ra_db, context, reinterpret_cast<void**>(&item)) || item == NULL )
+    sgx_spin_lock(&g_ra_db_lock);
+    if (0 != vector_get(&g_ra_db, context, reinterpret_cast<void**>(&item)) || item == NULL)
+    {
+        sgx_spin_unlock(&g_ra_db_lock);
         return SGX_ERROR_INVALID_PARAMETER;
+    }
+    sgx_spin_unlock(&g_ra_db_lock);
 
 
     sgx_ecc_state_handle_t ecc_state = NULL;
@@ -158,14 +168,25 @@ extern "C" sgx_status_t sgx_ra_proc_msg2_trusted(
         return SGX_ERROR_INVALID_PARAMETER;
 
     ra_db_item_t* item = NULL;
-    if(0 != vector_get(&g_ra_db, context, reinterpret_cast<void**>(&item)) || item == NULL )
+    sgx_spin_lock(&g_ra_db_lock);
+    if (0 != vector_get(&g_ra_db, context, reinterpret_cast<void**>(&item)) || item == NULL)
+    {
+        sgx_spin_unlock(&g_ra_db_lock);
         return SGX_ERROR_INVALID_PARAMETER;
+    }
+    sgx_spin_unlock(&g_ra_db_lock);
 
     sgx_ec256_private_t a;
     memset(&a, 0, sizeof(a));
     // Create gb_ga
     sgx_ec256_public_t gb_ga[2];
     sgx_ec256_public_t sp_pubkey;
+    sgx_ec_key_128bit_t smkey = {0};
+    sgx_ec_key_128bit_t skey = {0};
+    sgx_ec_key_128bit_t mkey = {0};
+    sgx_ec_key_128bit_t vkey = {0};
+    sgx_ra_derive_secret_keys_t ra_key_cb = NULL;
+
     memset(&gb_ga[0], 0, sizeof(gb_ga));
     sgx_spin_lock(&item->item_lock);
     //sgx_ra_get_ga must have been called
@@ -177,6 +198,7 @@ extern "C" sgx_status_t sgx_ra_proc_msg2_trusted(
     memcpy(&a, &item->a, sizeof(a));
     memcpy(&gb_ga[1], &item->g_a, sizeof(gb_ga[1]));
     memcpy(&sp_pubkey, &item->sp_pubkey, sizeof(sp_pubkey));
+    ra_key_cb = DEC_KDF_POINTER(item->derive_key_cb);
     sgx_spin_unlock(&item->item_lock);
     memcpy(&gb_ga[0], &p_msg2->g_b, sizeof(gb_ga[0]));
 
@@ -196,7 +218,7 @@ extern "C" sgx_status_t sgx_ra_proc_msg2_trusted(
     sgx_ec256_public_t* p_msg2_g_b = const_cast<sgx_ec256_public_t*>(&p_msg2->g_b);
     se_ret = sgx_ecc256_compute_shared_dhkey(&a,
         (sgx_ec256_public_t*)p_msg2_g_b,
-        (sgx_ec256_dh_shared_t*)&dh_key, ecc_state);
+        &dh_key, ecc_state);
     if(SGX_SUCCESS != se_ret)
     {
         if (SGX_ERROR_OUT_OF_MEMORY != se_ret)
@@ -223,13 +245,27 @@ extern "C" sgx_status_t sgx_ra_proc_msg2_trusted(
         sgx_ecc256_close_context(ecc_state);
         return SGX_ERROR_INVALID_SIGNATURE;
     }
-    sgx_ec_key_128bit_t smkey = {0};
-    sgx_ec_key_128bit_t skey = {0};
-    sgx_ec_key_128bit_t mkey = {0};
-    sgx_ec_key_128bit_t vkey = {0};
+
     do
     {
-        if (p_msg2->kdf_id == 0x0001)
+        if(NULL != ra_key_cb)
+        {
+            se_ret = ra_key_cb(&dh_key,
+                               p_msg2->kdf_id,
+                               &smkey,
+                               &skey,
+                               &mkey,
+                               &vkey);
+            if (SGX_SUCCESS != se_ret)
+            {
+                if(SGX_ERROR_OUT_OF_MEMORY != se_ret &&
+                    SGX_ERROR_INVALID_PARAMETER != se_ret &&
+                    SGX_ERROR_KDF_MISMATCH != se_ret)
+                    se_ret = SGX_ERROR_UNEXPECTED;
+                break;
+            }
+        }
+        else if (p_msg2->kdf_id == 0x0001)
         {
             se_ret = derive_key(&dh_key, "SMK", (uint32_t)(sizeof("SMK") -1), &smkey);
             if (SGX_SUCCESS != se_ret)
@@ -238,44 +274,27 @@ extern "C" sgx_status_t sgx_ra_proc_msg2_trusted(
                     se_ret = SGX_ERROR_UNEXPECTED;
                 break;
             }
-
-            sgx_cmac_128bit_tag_t mac;
-            uint32_t maced_size = offsetof(sgx_ra_msg2_t, mac);
-
-            se_ret = sgx_rijndael128_cmac_msg(&smkey, (const uint8_t *)p_msg2, maced_size, &mac);
+            se_ret = derive_key(&dh_key, "SK", (uint32_t)(sizeof("SK") -1), &skey);
             if (SGX_SUCCESS != se_ret)
             {
                 if(SGX_ERROR_OUT_OF_MEMORY != se_ret)
                     se_ret = SGX_ERROR_UNEXPECTED;
                 break;
             }
-            //Check mac
-            if(0 == consttime_memequal(mac, p_msg2->mac, sizeof(mac)))
-            {
-                se_ret = SGX_ERROR_MAC_MISMATCH;
-                break;
-            }
 
-            se_ret = derive_key((sgx_ec256_dh_shared_t*)&dh_key, "SK", (uint32_t )(sizeof("SK") -1), &skey);
-            if (SGX_SUCCESS != se_ret)
-            {
-            if(SGX_ERROR_OUT_OF_MEMORY != se_ret)
-                se_ret = SGX_ERROR_UNEXPECTED;
-                break;
-            }
-
-            se_ret = derive_key((sgx_ec256_dh_shared_t*)&dh_key, "MK", (uint32_t)(sizeof("MK") -1), &mkey);
-            if (SGX_SUCCESS != se_ret)
-            {
-            if(SGX_ERROR_OUT_OF_MEMORY != se_ret)
-                se_ret = SGX_ERROR_UNEXPECTED;
-                break;
-            }
-
-            se_ret = derive_key((sgx_ec256_dh_shared_t*)&dh_key, "VK", (uint32_t)(sizeof("VK") -1), &vkey);
+            se_ret = derive_key(&dh_key, "MK", (uint32_t)(sizeof("MK") -1), &mkey);
             if (SGX_SUCCESS != se_ret)
             {
                 if(SGX_ERROR_OUT_OF_MEMORY != se_ret)
+                    se_ret = SGX_ERROR_UNEXPECTED;
+                break;
+            }
+
+            se_ret = derive_key(&dh_key, "VK", (uint32_t)(sizeof("VK") -1), &vkey);
+            if (SGX_SUCCESS != se_ret)
+            {
+                if(SGX_ERROR_OUT_OF_MEMORY != se_ret)
+                    se_ret = SGX_ERROR_UNEXPECTED;
                 break;
             }
         }
@@ -285,7 +304,24 @@ extern "C" sgx_status_t sgx_ra_proc_msg2_trusted(
             break;
         }
 
-        //create a random nonce
+        sgx_cmac_128bit_tag_t mac;
+        uint32_t maced_size = offsetof(sgx_ra_msg2_t, mac);
+
+        se_ret = sgx_rijndael128_cmac_msg(&smkey, (const uint8_t *)p_msg2, maced_size, &mac);
+        if (SGX_SUCCESS != se_ret)
+        {
+            if(SGX_ERROR_OUT_OF_MEMORY != se_ret)
+                se_ret = SGX_ERROR_UNEXPECTED;
+            break;
+        }
+        //Check mac
+        if(0 == consttime_memequal(mac, p_msg2->mac, sizeof(mac)))
+        {
+            se_ret = SGX_ERROR_MAC_MISMATCH;
+            break;
+        }
+
+        //create a nonce
         se_ret =sgx_read_rand((uint8_t*)p_nonce, sizeof(sgx_quote_nonce_t));
         if (SGX_SUCCESS != se_ret)
         {
@@ -359,8 +395,13 @@ extern "C" sgx_status_t sgx_ra_get_msg3_trusted(
         return SGX_ERROR_INVALID_PARAMETER;
 
     ra_db_item_t* item = NULL;
-    if(0 != vector_get(&g_ra_db, context, reinterpret_cast<void**>(&item)) || item == NULL )
+    sgx_spin_lock(&g_ra_db_lock);
+    if (0 != vector_get(&g_ra_db, context, reinterpret_cast<void**>(&item)) || item == NULL)
+    {
+        sgx_spin_unlock(&g_ra_db_lock);
         return SGX_ERROR_INVALID_PARAMETER;
+    }
+    sgx_spin_unlock(&g_ra_db_lock);
 
     //check integer overflow of msg3_size and quote_size
     if (UINTPTR_MAX - reinterpret_cast<uintptr_t>(emp_msg3) < msg3_size ||
@@ -370,6 +411,14 @@ extern "C" sgx_status_t sgx_ra_get_msg3_trusted(
 
     if (!sgx_is_outside_enclave(emp_msg3, msg3_size))
         return SGX_ERROR_INVALID_PARAMETER;
+    //
+    // fence after boundary check 
+    // this also stops speculation in case of 
+    // branch associated 
+    // with sizeof(sgx_ra_msg3_t) + quote_size != msg3_size
+    // mispredicting
+    //
+    sgx_lfence();
 
     sgx_status_t se_ret = SGX_ERROR_UNEXPECTED;
 
@@ -473,7 +522,7 @@ extern "C" sgx_status_t sgx_ra_get_msg3_trusted(
 
         while (emp_quote_piecemeal < emp_msg3->quote + quote_size)
         {
-            //caculate size of one piece, the size of them are sizeof(quote_piece) except for the last one.
+            //calculate size of one piece, the size of them are sizeof(quote_piece) except for the last one.
             if (static_cast<uint32_t>(emp_msg3->quote + quote_size - emp_quote_piecemeal) < quote_piece_size)
                 quote_piece_size = static_cast<uint32_t>(emp_msg3->quote - emp_quote_piecemeal) + quote_size ;
             memcpy(quote_piece, emp_quote_piecemeal, quote_piece_size);
@@ -536,20 +585,49 @@ extern "C" sgx_status_t sgx_ra_get_msg3_trusted(
 }
 
 // TKE interface for isv enclaves
-sgx_status_t sgx_ra_init(
+sgx_status_t sgx_ra_init_ex(
     const sgx_ec256_public_t *p_pub_key,
     int b_pse,
+    sgx_ra_derive_secret_keys_t derive_key_cb,
     sgx_ra_context_t *p_context)
 {
     int valid = 0;
     sgx_status_t ret = SGX_SUCCESS;
     sgx_ecc_state_handle_t ecc_state = NULL;
 
+    // initialize g_kdf_cookie for the first time sgx_ra_init_ex is called.
+    if (unlikely(g_kdf_cookie == 0))
+    {
+        uintptr_t rand = 0;
+        do
+        {
+            if (SGX_SUCCESS != sgx_read_rand((unsigned char *)&rand, sizeof(rand)))
+            {
+                return SGX_ERROR_UNEXPECTED;
+            }
+        } while (rand == 0);
+
+        sgx_spin_lock(&g_ra_db_lock);
+        if (g_kdf_cookie == 0)
+        {
+            g_kdf_cookie = rand;
+            memset_s(&rand, sizeof(rand), 0, sizeof(rand));
+        }
+        sgx_spin_unlock(&g_ra_db_lock);
+    }
+
     if(!p_pub_key || !p_context)
         return SGX_ERROR_INVALID_PARAMETER;
 
     if(!sgx_is_within_enclave(p_pub_key, sizeof(sgx_ec256_public_t)))
         return SGX_ERROR_INVALID_PARAMETER;
+
+    //derive_key_cb can be NULL
+    if (NULL != derive_key_cb &&
+        !sgx_is_within_enclave((const void*)derive_key_cb, 0))
+    {
+        return SGX_ERROR_INVALID_PARAMETER;
+    }
 
     ret = sgx_ecc256_open_context(&ecc_state);
     if(SGX_SUCCESS != ret)
@@ -593,6 +671,8 @@ sgx_status_t sgx_ra_init(
             return ret;
         }
     }
+
+    new_item->derive_key_cb = ENC_KDF_POINTER(derive_key_cb);
     new_item->state = ra_inited;
 
     //find first empty slot in g_ra_db
@@ -645,6 +725,19 @@ sgx_status_t sgx_ra_init(
 }
 
 // TKE interface for isv enclaves
+sgx_status_t sgx_ra_init(
+    const sgx_ec256_public_t *p_pub_key,
+    int b_pse,
+    sgx_ra_context_t *p_context)
+{
+
+    return sgx_ra_init_ex(p_pub_key,
+                      b_pse,
+                      NULL,
+                      p_context);
+}
+
+// TKE interface for isv enclaves
 sgx_status_t sgx_ra_get_keys(
     sgx_ra_context_t context,
     sgx_ra_key_type_t type,
@@ -653,9 +746,13 @@ sgx_status_t sgx_ra_get_keys(
     if(vector_size(&g_ra_db) <= context || !p_key)
         return SGX_ERROR_INVALID_PARAMETER;
     ra_db_item_t* item = NULL;
-    if(0 != vector_get(&g_ra_db, context, reinterpret_cast<void**>(&item)) || item == NULL )
+    sgx_spin_lock(&g_ra_db_lock);
+    if (0 != vector_get(&g_ra_db, context, reinterpret_cast<void**>(&item)) || item == NULL)
+    {
+        sgx_spin_unlock(&g_ra_db_lock);
         return SGX_ERROR_INVALID_PARAMETER;
-
+    }
+    sgx_spin_unlock(&g_ra_db_lock);
     if(!sgx_is_within_enclave(p_key, sizeof(sgx_ra_key_128_t)))
         return SGX_ERROR_INVALID_PARAMETER;
 
@@ -682,15 +779,14 @@ sgx_status_t SGXAPI sgx_ra_close(
     if(vector_size(&g_ra_db) <= context)
         return SGX_ERROR_INVALID_PARAMETER;
     ra_db_item_t* item = NULL;
-    if(0 != vector_get(&g_ra_db, context, reinterpret_cast<void**>(&item)) || item == NULL )
-        return SGX_ERROR_INVALID_PARAMETER;
     sgx_spin_lock(&g_ra_db_lock);
-    //safe clear private key and RA key before free memory to defense in depth
-    memset_s(&item->a,sizeof(item->a),0,sizeof(sgx_ec256_private_t));
-    memset_s(&item->vk_key,sizeof(item->vk_key),0,sizeof(sgx_ec_key_128bit_t));
-    memset_s(&item->mk_key,sizeof(item->mk_key),0,sizeof(sgx_ec_key_128bit_t));
-    memset_s(&item->sk_key,sizeof(item->sk_key),0,sizeof(sgx_ec_key_128bit_t));
-    memset_s(&item->smk_key,sizeof(item->smk_key),0,sizeof(sgx_ec_key_128bit_t));
+    if (0 != vector_get(&g_ra_db, context, reinterpret_cast<void**>(&item)) || item == NULL)
+    {
+        sgx_spin_unlock(&g_ra_db_lock);
+        return SGX_ERROR_INVALID_PARAMETER;
+    }
+    //safe clear global data including private key and RA key before free memory
+    memset_s(item, sizeof(*item), 0, sizeof(ra_db_item_t));
     SAFE_FREE(item);
     vector_set(&g_ra_db, context, NULL);
     sgx_spin_unlock(&g_ra_db_lock);

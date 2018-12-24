@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -30,9 +30,9 @@
  */
 
 
-
 #include "aesm_long_lived_thread.h"
 #include "pve_logic.h"
+#include "pse_op_logic.h"
 #include "platform_info_logic.h"
 #include "oal/internal_log.h"
 #include "se_time.h"
@@ -40,6 +40,7 @@
 #include <time.h>
 #include <assert.h>
 #include <list>
+#include "LEClass.h"
 
 enum _thread_state
 {
@@ -56,6 +57,7 @@ enum _io_cache_state
 };
 
 #define MAX_OUTPUT_CACHE 50
+#define THREAD_INFINITE_TICK_COUNT 0xFFFFFFFFFFFFFFFFLL
 class ThreadStatus;
 class BaseThreadIOCache;
 typedef ae_error_t (*long_lived_thread_func_t)(BaseThreadIOCache *cache);
@@ -176,18 +178,18 @@ public:
     }
     void set_status_finish(BaseThreadIOCache* ioc);//only called at the end of aesm_long_lived_thread_entry
     void deref(BaseThreadIOCache* iocache);
-    ae_error_t wait_iocache(BaseThreadIOCache* ioc);
+    ae_error_t wait_iocache_timeout(BaseThreadIOCache* ioc, uint64_t stop_tick_count);
 
     //create thread and wait at most 'timeout' for the thread to be finished
     // It will first look up whether there is a previous run with same input before starting the thread
     // we should not delete ioc after calling to this function
     ae_error_t set_thread_start(BaseThreadIOCache* ioc,  BaseThreadIOCache *&out_ioc, uint32_t timeout=THREAD_TIMEOUT);
 
-    void stop_thread();//We need wait for thread to be terminated and all thread_handle in list to be closed
+    void stop_thread(uint64_t stop_milli_second);//We need wait for thread to be terminated and all thread_handle in list to be closed
 
-    ~ThreadStatus(){stop_thread();}//ThreadStatus instance should be global object. Otherwise, it is possible that the object is destroyed before a thread waiting for and IOCache got notified and causing exception
+    ~ThreadStatus(){stop_thread(THREAD_INFINITE_TICK_COUNT);}//ThreadStatus instance should be global object. Otherwise, it is possible that the object is destroyed before a thread waiting for and IOCache got notified and causing exception
 
-    ae_error_t wait_for_cur_thread(void);
+    ae_error_t wait_for_cur_thread(uint64_t millisecond);
 
     //function to query whether current thread is idle,
     //if it is idle, return true and reset clock to current clock value
@@ -218,7 +220,7 @@ static ae_error_t aesm_long_lived_thread_entry(aesm_thread_arg_type_t arg)
     return ae_err;
 }
 
-void ThreadStatus::stop_thread()
+void ThreadStatus::stop_thread(uint64_t stop_tick_count)
 {
     //change state to stop
     thread_mutex.lock();
@@ -237,7 +239,7 @@ void ThreadStatus::stop_thread()
            BaseThreadIOCache *p=*it;
            p->ref_count++;
            thread_mutex.unlock();
-           wait_iocache(p);
+           wait_iocache_timeout(p, stop_tick_count);
            thread_mutex.lock();
         }else{
             break;
@@ -249,9 +251,15 @@ void ThreadStatus::stop_thread()
     //Leave memory leak here is OK and all pointer to BaseThreadIOCache will not be released
 }
 
-ae_error_t ThreadStatus::wait_for_cur_thread(void)
+ae_error_t ThreadStatus::wait_for_cur_thread(uint64_t millisecond)
 {
     BaseThreadIOCache *ioc=NULL;
+    uint64_t stop_tick_count;
+    if(millisecond == AESM_THREAD_INFINITE){
+        stop_tick_count = THREAD_INFINITE_TICK_COUNT;
+    }else{
+        stop_tick_count = se_get_tick_count() + (millisecond*se_get_tick_count_freq()+500)/1000;
+    }
     thread_mutex.lock();
     if(cur_iocache!=NULL){
         ioc = cur_iocache;
@@ -259,25 +267,34 @@ ae_error_t ThreadStatus::wait_for_cur_thread(void)
     }
     thread_mutex.unlock();
     if(ioc!=NULL){
-        return wait_iocache(ioc);
+        return wait_iocache_timeout(ioc, stop_tick_count);
     }
     return AE_SUCCESS;
 }
 
-ae_error_t ThreadStatus::wait_iocache(BaseThreadIOCache* ioc)
+ae_error_t ThreadStatus::wait_iocache_timeout(BaseThreadIOCache* ioc, uint64_t stop_tick_count)
 {
     ae_error_t ae_ret=AE_SUCCESS;
+    uint64_t cur_tick_count = se_get_tick_count();
+    uint64_t freq = se_get_tick_count_freq();
     bool need_wait=false;
     aesm_thread_t handle=NULL;
     thread_mutex.lock();
-    if(ioc->thread_handle!=NULL){
+    if(ioc->thread_handle!=NULL&&(cur_tick_count<stop_tick_count||stop_tick_count==THREAD_INFINITE_TICK_COUNT)){
         AESM_DBG_TRACE("wait for busy ioc %p(refcount=%d)",ioc,ioc->ref_count);
         need_wait = true;
         handle = ioc->thread_handle;
     }
     thread_mutex.unlock();
     if(need_wait){
-        ae_ret= aesm_wait_thread(handle, &ae_ret, AESM_THREAD_INFINITE);
+        unsigned long diff_time;
+        if(stop_tick_count == THREAD_INFINITE_TICK_COUNT){
+            diff_time = AESM_THREAD_INFINITE;
+        }else{
+            double wtime=(double)(stop_tick_count-cur_tick_count)*1000.0/(double)freq;
+            diff_time = (unsigned long)(wtime+0.5);
+        }
+        ae_ret= aesm_wait_thread(handle, &ae_ret, diff_time);
     }
     deref(ioc);
     return ae_ret;
@@ -376,6 +393,8 @@ static time_t get_timeout_via_ae_error(ae_error_t ae)
     case OAL_NETWORK_RESEND_REQUIRED:
         return cur-1;//always timeout, the error code will never be reused
     case PVE_INTEGRITY_CHECK_ERROR:
+    case PSE_OP_ERROR_EPH_SESSION_ESTABLISHMENT_INTEGRITY_ERROR:
+    case AESM_PSDA_LT_SESSION_INTEGRITY_ERROR:
     case OAL_NETWORK_UNAVAILABLE_ERROR:
     case OAL_NETWORK_BUSY:
     case PVE_SERVER_BUSY_ERROR:
@@ -384,10 +403,12 @@ static time_t get_timeout_via_ae_error(ae_error_t ae)
     case PVE_REVOKED_ERROR:
     case PVE_MSG_ERROR:
     case PVE_PERFORMANCE_REKEY_NOT_SUPPORTED:
-    case PSW_UPDATED_REQUIRED:
+    case AESM_PSDA_PLATFORM_KEYS_REVOKED:
+    case AESM_PSDA_PROTOCOL_NOT_SUPPORTED:
+    case PSW_UPDATE_REQUIRED:
         return cur+TIMEOUT_LONG_TIME;
     default:
-        return cur+TIMEOUT_FOR_A_WHILE;//not retry too quickly for unknown error
+        return cur+TIMEOUT_SHORT_TIME;//retry quicky for unknown error
     }
 }
 
@@ -431,6 +452,10 @@ bool ThreadStatus::query_status_and_reset_clock(void)
 //Code below to define IOCache of each thread
 static ThreadStatus epid_thread;
 
+static ThreadStatus long_term_paring_thread;
+
+static ThreadStatus white_list_thread;
+
 
 class EpidProvIOCache:public BaseThreadIOCache{
     bool performance_rekey;//input
@@ -449,16 +474,119 @@ public:
     }
 };
 
+class WhiteListIOCache :public BaseThreadIOCache{
+//no input to be cached for white list pulling
+protected:
+    WhiteListIOCache(void){
+    }
+    virtual ae_error_t entry(void);
+    virtual ThreadStatus& get_thread();
+    friend ae_error_t start_white_list_thread(unsigned long timeout);
+public:
+    virtual bool operator==(const BaseThreadIOCache& oc)const{
+        const WhiteListIOCache *p = dynamic_cast<const WhiteListIOCache*>(&oc);
+        if (p == NULL) return false;
+        return true;
+    }
+};
+class CheckLtpIOCache:public BaseThreadIOCache{
+    bool is_new_pairing;//extra output
+protected:
+    CheckLtpIOCache(){
+        is_new_pairing=false;
+    }
+    virtual ae_error_t entry();
+    virtual ThreadStatus& get_thread();
+    friend ae_error_t start_check_ltp_thread(bool& is_new_pairing, unsigned long timeout);
+public:
+    virtual bool operator==(const BaseThreadIOCache& oc)const{
+        const CheckLtpIOCache *p=dynamic_cast<const CheckLtpIOCache *>(&oc);
+        if(p==NULL)return false;
+        return true;//no input, always equal
+    }
+};
+
+class UpdatePseIOCache:public BaseThreadIOCache{
+    platform_info_blob_wrapper_t pib;//input
+    uint32_t attestation_status;//input
+protected:
+    UpdatePseIOCache(const platform_info_blob_wrapper_t& pib_info, uint32_t attst_status){
+        (void)memcpy_s(&this->pib, sizeof(this->pib), &pib_info, sizeof(pib_info));
+        attestation_status=attst_status;
+    }
+    virtual ae_error_t entry();
+    virtual ThreadStatus& get_thread();
+    friend ae_error_t start_update_pse_thread(const platform_info_blob_wrapper_t* update_blob, uint32_t attestation_status, unsigned long timeout);
+public:
+    virtual bool operator==(const BaseThreadIOCache& oc)const{
+        const UpdatePseIOCache *p=dynamic_cast<const UpdatePseIOCache *>(&oc);
+        if(p==NULL)return false;
+        return attestation_status==p->attestation_status&&memcmp(&pib, &p->pib, sizeof(pib))==0;
+    }
+};
+
+class CertProvLtpIOCache:public BaseThreadIOCache{
+    bool is_new_pairing;//extra output
+protected:
+    CertProvLtpIOCache(){
+        is_new_pairing = false;
+    }
+    virtual ae_error_t entry();
+    virtual ThreadStatus& get_thread();
+    friend ae_error_t start_long_term_pairing_thread(bool& is_new_paring, unsigned long timeout);
+public:
+    virtual bool operator==(const BaseThreadIOCache& oc)const{
+        const CertProvLtpIOCache *p=dynamic_cast<const CertProvLtpIOCache *>(&oc);
+        if(p==NULL)return false;
+        return true;
+    }
+};
 
 ThreadStatus& EpidProvIOCache::get_thread()
 {
     return epid_thread;
 }
 
+ThreadStatus& CheckLtpIOCache::get_thread()
+{
+    return long_term_paring_thread;
+}
+
+ThreadStatus& UpdatePseIOCache::get_thread()
+{
+    return long_term_paring_thread;
+}
+
+ThreadStatus& CertProvLtpIOCache::get_thread()
+{
+    return long_term_paring_thread;
+}
+ThreadStatus& WhiteListIOCache::get_thread()
+{
+    return white_list_thread;
+}
 
 ae_error_t EpidProvIOCache::entry()
 {
     return ae_ret = PvEAESMLogic::epid_provision_thread_func(performance_rekey); 
+}
+ae_error_t CheckLtpIOCache::entry()
+{
+    return ae_ret = PlatformInfoLogic::check_ltp_thread_func(is_new_pairing);
+}
+
+ae_error_t UpdatePseIOCache::entry()
+{
+    return ae_ret = PlatformInfoLogic::update_pse_thread_func(&pib, attestation_status);
+}
+
+ae_error_t CertProvLtpIOCache::entry()
+{
+    return ae_ret = PSEOPAESMLogic::certificate_provisioning_and_long_term_pairing_func(is_new_pairing);
+}
+ae_error_t WhiteListIOCache::entry()
+{
+    return ae_ret = CLEClass::update_white_list_by_url();
 }
 
 
@@ -494,17 +622,49 @@ ae_error_t start_epid_provision_thread(bool performance_rekey, unsigned long tim
     FINI_THREAD()
 }
 
+ae_error_t start_white_list_thread(unsigned long timeout)
+{
+    INIT_THREAD(WhiteListIOCache, timeout, ())
+    FINI_THREAD()
+}
+ae_error_t start_check_ltp_thread(bool& is_new_pairing, unsigned long timeout)
+{
+    INIT_THREAD(CheckLtpIOCache, timeout, ())
+    COPY_OUTPUT(is_new_pairing);
+    FINI_THREAD()
+}
+
+ae_error_t start_update_pse_thread(const platform_info_blob_wrapper_t* update_blob, uint32_t attestation_status, unsigned long timeout)
+{
+    INIT_THREAD(UpdatePseIOCache, timeout, (*update_blob, attestation_status))
+    FINI_THREAD()
+}
+
+ae_error_t start_long_term_pairing_thread(bool& is_new_pairing, unsigned long timeout)
+{
+    INIT_THREAD(CertProvLtpIOCache, timeout, ())
+    COPY_OUTPUT(is_new_pairing);
+    FINI_THREAD()
+}
 bool query_pve_thread_status(void)
 {
     return epid_thread.query_status_and_reset_clock();
 }
-
-ae_error_t wait_pve_thread(void)
+bool query_pse_thread_status(void)
 {
-    return epid_thread.wait_for_cur_thread();
+    return long_term_paring_thread.query_status_and_reset_clock();
+}
+ae_error_t wait_pve_thread(uint64_t time_out_milliseconds)
+{
+    return epid_thread.wait_for_cur_thread(time_out_milliseconds);
 }
 
-void stop_all_long_lived_threads(void)
+void stop_all_long_lived_threads(uint64_t time_out_milliseconds)
 {
-    epid_thread.stop_thread();
+    uint64_t freq = se_get_tick_count_freq();
+    uint64_t stop_tick_count = se_get_tick_count()+(time_out_milliseconds*freq+500)/1000;
+    epid_thread.stop_thread(stop_tick_count);
+    long_term_paring_thread.stop_thread(stop_tick_count);
+    white_list_thread.stop_thread(stop_tick_count);
 }
+

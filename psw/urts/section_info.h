@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -36,16 +36,14 @@
 #include "util.h"
 #include <vector>
 
-using namespace std;
-
 typedef struct _section_info_t
 {
-    uint8_t *raw_data;          //The file pointer to the first page of the section.
+    const uint8_t *raw_data;          //The file pointer to the first page of the section.
     uint64_t raw_data_size;     //The size of the section or the size of the initialized section on disk.
     uint64_t rva;               //The address of the first byte of the section relative to the image base when section is loaded into memory.
     uint64_t virtual_size;      //The total size of the section when loaded into memory.
     si_flags_t flag;            //the attribute of memory region.
-    vector<uint8_t> *bitmap;    //bitmap of the total image page, if bit is 1, the page should be writable.
+    std::vector<uint8_t> *bitmap;    //bitmap of the total image page, if bit is 1, the page should be writable.
     //the first bit of scetion in the bitmap is bitmap[(rva >> PAGE_SHIFT) / 8] & (1 << ((rva >> PAGE_SHIFT) % 8))
     //if the bitmap is NULL, then no restrict on page attribute.
 } section_info_t;

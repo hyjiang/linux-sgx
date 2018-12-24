@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+# Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -57,19 +57,13 @@ BUILD_DIR=${ROOT_DIR}/build/linux
 # Get the architecture of the build from generated binary
 get_arch()
 {
-    local a=$(readelf -h $BUILD_DIR/sgx_sign | awk '/Class:/{print $2}')
-    test $a = ELF64 && echo 'x86_64' || echo 'x86'
+    local a=$(readelf -h $BUILD_DIR/sgx_sign | sed -n '2p' | awk '{print $6}')
+    test $a = 01 && echo 'x86' || echo 'x64'
 }
  
 
 ARCH=$(get_arch)
-
-case $ARCH in
-    x86_64)PACKAGE_SUFFIX="x64"
-    ;;
-    x86)PACKAGE_SUFFIX="x86"
-    ;;
-esac
+PACKAGE_SUFFIX="$ARCH"
 
 case "$INSTALLER_TYPE" in
     psw)

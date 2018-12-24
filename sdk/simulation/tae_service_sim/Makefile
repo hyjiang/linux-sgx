@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+# Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -37,8 +37,8 @@ CXXFLAGS += -Werror $(ENCLAVE_CXXFLAGS)
 
 INCLUDE += -I$(COMMON_DIR)            \
            -I$(COMMON_DIR)/inc/tlibc  \
-           -I$(LINUX_EXTERNAL_DIR)/crypto_px/include \
-           -I$(LINUX_PSW_DIR)/ae/inc \
+           -I$(SGX_IPP_INC)           \
+           -I$(LINUX_PSW_DIR)/ae/inc  \
            -I$(LINUX_PSW_DIR)/ae/inc/internal \
            -I$(TOP_DIR)/common/inc \
            -I$(TOP_DIR)/common/inc/internal 
@@ -61,16 +61,13 @@ EDGER8R       := $(EDGER8R_DIR)/_build/Edger8r.native
 
 SRC     := $(wildcard *.cpp)
 SRC     += $(TOP_DIR)/common/src/dh.cpp
-C_OBJ   := $(OBJ:.c=.o)
-CXX_OBJ := $(SRC:.cpp=.o)
-
-OBJS := $(CXX_OBJ) $(C_OBJ)
+OBJS := $(sort $(SRC:.cpp=.o))
 
 .PHONY: all
 all: $(TSERVICE_SIM_LIB) | $(BUILD_DIR)
 	$(CP) $^ $|
 
-$(TAE_SERVICE_SIM_LIB): sgx_tae_service_t.h $(OBJS)
+$(TAE_SERVICE_SIM_LIB): $(OBJS)
 	$(AR) rcsD $@ $(OBJS)
 
 $(TSERVICE_SIM_LIB): $(TAE_SERVICE_SIM_LIB) $(EC_DH_LIB) $(TSEAL_LIB) $(SE_LIB)
@@ -86,11 +83,8 @@ $(TSERVICE_SIM_LIB): $(TAE_SERVICE_SIM_LIB) $(EC_DH_LIB) $(TSEAL_LIB) $(SE_LIB)
 sgx_tae_service_t.h: $(EDLFILE) $(EDGER8R)
 	$(EDGER8R) --trusted --header-only --search-path $(TOP_DIR)/common/inc $<
 
-$(CXX_OBJ): %.o: %.cpp
+$(OBJS): %.o: %.cpp sgx_tae_service_t.h
 	$(CXX) $(CXXFLAGS) -fno-exceptions -fno-rtti $(INCLUDE) $(DEFINES) -c $< -o $@
-
-$(C_OBJ): %.o: %.c
-	$(CC) $(CFLAGS) $(INCLUDE) $(DEFINES) -c $< -o $@
 
 $(EDGER8R):
 	$(MAKE) -C $(EDGER8R_DIR)
@@ -119,4 +113,6 @@ clean:
 	@$(RM) sgx_tae_service_*.h
 
 .PHONY: rebuild
-rebuild: clean all
+rebuild:
+	$(MAKE) clean
+	$(MAKE) all

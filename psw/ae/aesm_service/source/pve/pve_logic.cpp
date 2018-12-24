@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -34,6 +34,7 @@
 #include "aesm_logic.h"
 #include "PVEClass.h"
 #include "QEClass.h"
+#include "PCEClass.h"
 #include "oal/oal.h"
 #include "aesm_epid_blob.h"
 #include "se_wrapper.h"
@@ -41,12 +42,13 @@
 #include "network_encoding_wrapper.h"
 #include "prof_fun.h"
 #include "aesm_long_lived_thread.h"
+#include "endpoint_select_info.h"
 #include <assert.h>
 
 #define SAFE_FREE(ptr)     {if (NULL != (ptr)) {free(ptr); (ptr)=NULL;}}
 
 //Function to continue process Provisioning logic when the response of ProvMsg1 is ProvMsg2
-ae_error_t PvEAESMLogic::process_pve_msg2(psvn_t& sigrl_psvn, const uint8_t* msg2, uint32_t msg2_size, const endpoint_selection_infos_t& es_info)
+ae_error_t PvEAESMLogic::process_pve_msg2(pve_data_t& data, const uint8_t* msg2, uint32_t msg2_size, const endpoint_selection_infos_t& es_info)
 {
     uint32_t msg_size = 0;
     uint8_t *msg = NULL;
@@ -54,7 +56,6 @@ ae_error_t PvEAESMLogic::process_pve_msg2(psvn_t& sigrl_psvn, const uint8_t* msg
     uint32_t resp_size = 0;
     epid_blob_with_cur_psvn_t epid_data;
     ae_error_t ret = AE_SUCCESS;
-    uint8_t ek2[SK_SIZE];
     AESM_PROFILE_FUN;
 
     AESM_DBG_DEBUG("enter fun");
@@ -74,7 +75,7 @@ ae_error_t PvEAESMLogic::process_pve_msg2(psvn_t& sigrl_psvn, const uint8_t* msg
     AESM_DBG_TRACE("estimate msg3 size: %d",msg_size);
 
     assert(msg_size > 0);
-    msg = reinterpret_cast<uint8_t *>(malloc(msg_size));
+    msg = static_cast<uint8_t *>(malloc(msg_size));
     if(msg == NULL){
         AESM_DBG_ERROR("malloc failed");
         ret = AE_OUT_OF_MEMORY_ERROR;
@@ -82,8 +83,9 @@ ae_error_t PvEAESMLogic::process_pve_msg2(psvn_t& sigrl_psvn, const uint8_t* msg
     }
     memset(msg, 0, msg_size);
     AESM_DBG_TRACE("start processing msg2 and gen msg3");
-    ret = static_cast<ae_error_t>(CPVEClass::instance().proc_prov_msg2(msg2, msg2_size, es_info.pek, epid_data.trusted_epid_blob, SGX_TRUSTED_EPID_BLOB_SIZE,//discard curpsvn in epid blob which is used in untrusted code only
-        ek2, &sigrl_psvn,  msg, msg_size));//with help of PvE, process ProvMsg2 and generate ProvMsg3
+    ret = static_cast<ae_error_t>(CPVEClass::instance().proc_prov_msg2(data, msg2, msg2_size,
+        epid_data.trusted_epid_blob, SGX_TRUSTED_EPID_BLOB_SIZE_SDK,//discard curpsvn in epid blob
+         msg, msg_size));//with help of PvE, process ProvMsg2 and generate ProvMsg3
 
     if(ret == AE_SUCCESS){
         if(GET_SIZE_FROM_PROVISION_REQUEST(msg)>msg_size){
@@ -97,20 +99,20 @@ ae_error_t PvEAESMLogic::process_pve_msg2(psvn_t& sigrl_psvn, const uint8_t* msg
             msg, msg_size, resp_msg, resp_size); //Encoding ProvMsg3, send to server, receive ProvMsg4 and decode
         if(ret != AE_SUCCESS){
             AESM_LOG_ERROR("%s",g_event_string_table[SGX_EVENT_EPID_PROV_FAILURE]);
-            AESM_DBG_WARN("send prov msg3 via network failed:%d",ret);
+            AESM_DBG_WARN("send prov msg3 via network failed:(ae%d)",ret);
             goto CLEANUP;
         }
         assert(resp_msg!=NULL);
         AESM_DBG_TRACE("Start to proc msg4");
-        ret = process_pve_msg4(resp_msg, resp_size, NULL, true, ek2);//The response msg must be ProvMsg4, process it to generate EPIDBlob
+        ret = process_pve_msg4(data, resp_msg, resp_size);//The response msg must be ProvMsg4, process it to generate EPIDBlob
         if(ret != AE_SUCCESS){
-            AESM_DBG_TRACE("processing msg4 failed:%d",ret);
+            AESM_DBG_TRACE("processing msg4 failed:(ae%d)",ret);
             goto CLEANUP;
         }
         ret = AE_SUCCESS;
         AESM_DBG_TRACE("processing msg4 succ");
     }else{
-        AESM_DBG_WARN("fail to process prov msg2:%d",ret);
+        AESM_DBG_WARN("fail to process prov msg2:(ae%d)",ret);
     }
 CLEANUP:
     SAFE_FREE(msg);
@@ -120,7 +122,7 @@ CLEANUP:
 }
 
 //Function to finish the Provisioning Logic when a ProvMsg4 is expected or encountered
-ae_error_t PvEAESMLogic::process_pve_msg4(const uint8_t* msg4, uint32_t msg4_size, const psvn_t* old_psvn, bool use_ek2, const uint8_t ek2[SK_SIZE])
+ae_error_t PvEAESMLogic::process_pve_msg4(const pve_data_t& data, const uint8_t* msg4, uint32_t msg4_size)
 {
     AESM_PROFILE_FUN;
     epid_blob_with_cur_psvn_t epid_data;
@@ -131,37 +133,25 @@ ae_error_t PvEAESMLogic::process_pve_msg4(const uint8_t* msg4, uint32_t msg4_siz
     memset(&epid_data, 0, sizeof(epid_data));
 
     //with the help of PvE to process ProvMsg4 and generate EPIDDataBlob
-    if((ret = static_cast<ae_error_t>(CPVEClass::instance().proc_prov_msg4(use_ek2, ek2,  msg4, msg4_size,
-        epid_data.trusted_epid_blob, SGX_TRUSTED_EPID_BLOB_SIZE )))!=AE_SUCCESS){
-            AESM_DBG_WARN("proc prov msg4 fail:%d",ret);
+    if((ret = static_cast<ae_error_t>(CPVEClass::instance().proc_prov_msg4(data,  msg4, msg4_size,
+        epid_data.trusted_epid_blob, SGX_TRUSTED_EPID_BLOB_SIZE_SDK)))!=AE_SUCCESS){
+            AESM_DBG_WARN("proc prov msg4 fail:(ae%d)",ret);
             goto fini;
     }
-    if(NULL != old_psvn){
-        if(0!=memcpy_s(&epid_data.cur_psvn, sizeof(epid_data.cur_psvn),
-            old_psvn, sizeof(psvn_t))){
-                AESM_DBG_ERROR("memcpy failed");
-                ret = PVE_UNEXPECTED_ERROR;
-                goto fini;
-        }
-    }else{//using current QE/PvE PSVN
-        uint16_t isv_svn;
-        ret = AESMLogic::get_qe_cpu_svn(epid_data.cur_psvn.cpu_svn);
-        if(AE_SUCCESS != ret){
-            goto fini;
-        }
-        ret = AESMLogic::get_qe_isv_svn(isv_svn);
-        if(AE_SUCCESS != ret){
-            goto fini;
-        }
-        if(0!=memcpy_s(&epid_data.cur_psvn.isv_svn, sizeof(epid_data.cur_psvn.isv_svn), &isv_svn, sizeof(isv_svn))){
+    if(0!=memcpy_s(&epid_data.cur_pi, sizeof(epid_data.cur_pi),
+        &data.bpi, sizeof(data.bpi))){
             AESM_DBG_ERROR("memcpy failed");
             ret = PVE_UNEXPECTED_ERROR;
             goto fini;
-        }
     }
+#ifdef DBG_LOG
+    char dbg_str[256];
+    aesm_dbg_format_hex(reinterpret_cast<const uint8_t *>(&epid_data), sizeof(epid_data), dbg_str, 256);
+    AESM_DBG_TRACE("write epid_data=%s",dbg_str);
+#endif
     ret=EPIDBlob::instance().write(epid_data);//save the data into persistent data storage
     if(AE_SUCCESS!=ret){
-        AESM_DBG_WARN("fail to write epid_data:%d",ret);
+        AESM_DBG_WARN("fail to write epid_data:(ae%d)",ret);
     }
 fini:
     return (ae_error_t)ret;
@@ -169,7 +159,7 @@ fini:
 
 //Function to process the Provisioning Logic for backup retrieval of old epid data blob
 //The function assumes that the PvE state has been IDLE
-ae_error_t PvEAESMLogic::update_old_blob(const psvn_t& psvn, const endpoint_selection_infos_t& es_info)
+ae_error_t PvEAESMLogic::update_old_blob(pve_data_t& data, const endpoint_selection_infos_t& es_info)
 {
     uint32_t       msg_size = 0;
     uint8_t        *msg = NULL;
@@ -183,7 +173,7 @@ ae_error_t PvEAESMLogic::update_old_blob(const psvn_t& psvn, const endpoint_sele
     msg_size = estimate_msg1_size(false);
     assert(msg_size > 0);
 
-    msg = reinterpret_cast<uint8_t *>(malloc(msg_size));
+    msg = static_cast<uint8_t *>(malloc(msg_size));
     if(msg == NULL){
         AESM_DBG_ERROR("malloc fail");
         ae_ret = AE_OUT_OF_MEMORY_ERROR;
@@ -191,12 +181,13 @@ ae_error_t PvEAESMLogic::update_old_blob(const psvn_t& psvn, const endpoint_sele
     }
     memset(msg, 0, msg_size);
 
-    AESM_DBG_TRACE("start to gen prov msg1, estimated size %d", msg_size);
-    ae_ret = CPVEClass::instance().gen_prov_msg1(&psvn, es_info.pek,
-        false, msg, msg_size);//generate ProvMsg1
+    AESM_DBG_TRACE("start to gen prov msg1, estimate size %d", msg_size);
+    data.is_backup_retrieval = true;
+    data.is_performance_rekey = false;
+    ae_ret = CPVEClass::instance().gen_prov_msg1(data, msg, msg_size);//generate ProvMsg1
     if (ae_ret != AE_SUCCESS)
     {
-        AESM_DBG_WARN("gen prov msg1 failed:%d",ae_ret);
+        AESM_DBG_WARN("gen prov msg1 failed:(ae%d)",ae_ret);
         goto ret_point;
     }
     msg_size = static_cast<uint32_t>(GET_SIZE_FROM_PROVISION_REQUEST(msg));
@@ -216,11 +207,11 @@ ae_error_t PvEAESMLogic::update_old_blob(const psvn_t& psvn, const endpoint_sele
         goto ret_point;
     }
 
-    AESM_DBG_TRACE("start to proc msg4");
+    AESM_DBG_TRACE("start to send msg4 to server");
 
     if(GET_TYPE_FROM_PROVISION_RESPONSE(resp_msg) == TYPE_PROV_MSG4){
-        ae_ret = process_pve_msg4(resp_msg, resp_size, &psvn, false, NULL);//process ProvMsg4 and generated/save EPID Data Blob
-        AESM_DBG_TRACE("msg4 processing finished, status %d",ae_ret);
+        ae_ret = process_pve_msg4(data, resp_msg, resp_size);//process ProvMsg4 and generated/save EPID Data Blob
+        AESM_DBG_TRACE("msg4 processing finished, status (ae%d)",ae_ret);
     }else{
         AESM_DBG_WARN("response message is not prov msg4");
         ae_ret = PVE_UNEXPECTED_ERROR;
@@ -259,8 +250,9 @@ aesm_error_t PvEAESMLogic::pve_error_postprocess(ae_error_t ae_error)
     case PVE_EPIDBLOB_ERROR:
         return AESM_EPIDBLOB_ERROR;
     case AE_ENCLAVE_LOST:
-    case AE_SERVER_NOT_AVAILABLE:
         return AESM_NO_DEVICE_ERROR;
+    case AE_SERVER_NOT_AVAILABLE:
+        return AESM_SERVICE_UNAVAILABLE;
     case PVE_INTEGRITY_CHECK_ERROR:
     {
         AESM_LOG_FATAL("%s", g_event_string_table[SGX_EVENT_EPID_PROV_INTEGRITY_ERROR]);
@@ -278,10 +270,15 @@ aesm_error_t PvEAESMLogic::pve_error_postprocess(ae_error_t ae_error)
         return AESM_EPID_REVOKED_ERROR;
     case PVE_SERVER_BUSY_ERROR:
         return AESM_BACKEND_SERVER_BUSY;
+    case PVE_PROV_ATTEST_KEY_NOT_FOUND:
+        return AESM_UNRECOGNIZED_PLATFORM;
     case AE_OUT_OF_MEMORY_ERROR:
         return AESM_OUT_OF_MEMORY_ERROR;
-    case PSW_UPDATED_REQUIRED:
+    case PSW_UPDATE_REQUIRED:
+    case PVE_PROV_ATTEST_KEY_TCB_OUT_OF_DATE:
         return AESM_UPDATE_AVAILABLE;
+    case AESM_AE_OUT_OF_EPC:
+        return AESM_OUT_OF_EPC;
     default:
         return AESM_UNEXPECTED_ERROR;
     }
@@ -292,12 +289,37 @@ aesm_error_t PvEAESMLogic::provision(bool performance_rekey_used, uint32_t timeo
     ae_error_t     ae_ret = AE_SUCCESS;
     AESM_PROFILE_FUN;
     AESM_DBG_DEBUG("enter fun");
+    AESM_DBG_TRACE("start end point selection");
 
     ae_ret = start_epid_provision_thread(performance_rekey_used, timeout_usec);
 
     return pve_error_postprocess(ae_ret);
 }
 
+static void log_provision_result(ae_error_t ae_ret)
+{
+    // Log provisioning results to the Admin Log
+    switch (ae_ret) {
+    case AE_SUCCESS:
+        AESM_LOG_INFO_ADMIN("%s", g_admin_event_string_table[SGX_ADMIN_EVENT_EPID_PROV_SUCCESS]);
+        break;
+    case OAL_NETWORK_UNAVAILABLE_ERROR:
+        AESM_LOG_ERROR_ADMIN("%s", g_admin_event_string_table[SGX_ADMIN_EVENT_EPID_PROV_FAIL_NW]);
+        break;
+    case PSW_UPDATE_REQUIRED:
+        AESM_LOG_ERROR_ADMIN("%s", g_admin_event_string_table[SGX_ADMIN_EVENT_EPID_PROV_FAIL_PSWVER]);
+        break;
+    case PVE_REVOKED_ERROR:
+        AESM_LOG_ERROR_ADMIN("%s", g_admin_event_string_table[SGX_ADMIN_EVENT_EPID_PROV_FAIL_REVOKED]);
+        break;
+    case OAL_PROXY_SETTING_ASSIST://do not log for proxy assist and thread time out error
+    case OAL_THREAD_TIMEOUT_ERROR:
+        break;
+    default:
+        AESM_LOG_ERROR_ADMIN("%s", g_admin_event_string_table[SGX_ADMIN_EVENT_EPID_PROV_FAIL]);
+        break;
+    }
+}
 
 ae_error_t PvEAESMLogic::epid_provision_thread_func(bool performance_rekey_used)
 {
@@ -307,32 +329,28 @@ ae_error_t PvEAESMLogic::epid_provision_thread_func(bool performance_rekey_used)
     uint32_t       resp_size = 0;
     ae_error_t     ae_ret = AE_SUCCESS;
     uint32_t       repeat = 0;
-    int            retry = 0;
     endpoint_selection_infos_t   es_info;
+    pve_data_t     pve_data;
     
+    AESM_LOG_INFO_ADMIN("%s", g_admin_event_string_table[SGX_ADMIN_EVENT_EPID_PROV_START]);
+    memset(&pve_data, 0, sizeof(pve_data));
     if(AE_SUCCESS!=(ae_ret=aesm_start_request_wake_execution())){
-        AESM_DBG_ERROR("fail to request wake execution:%d", ae_ret);
+        AESM_DBG_ERROR("fail to request wake execution:(ae%d)", ae_ret);
+        log_provision_result(ae_ret);
         return ae_ret;
     }
 
+    AESM_DBG_TRACE("start end point selection");
     if((ae_ret = EndpointSelectionInfo::instance().start_protocol(es_info))!=AE_SUCCESS){//EndPoint Selection Protocol to setup Provisioning URL
         (void)aesm_stop_request_wake_execution();
-        AESM_DBG_WARN("end point selection failed:%d",ae_ret);
+        AESM_DBG_WARN("end point selection failed:(ae%d)",ae_ret);
+        log_provision_result(ae_ret);
         return ae_ret;
     }
 
     //If enclave_lost encountered(such as S3/S4 reached, the retry will be increased by 1, for other kinds of exception like network error, repeat is increased by 1)
-    while((ae_ret!=AE_ENCLAVE_LOST&&repeat < AESM_RETRY_COUNT) || (ae_ret == AE_ENCLAVE_LOST && retry < AESM_RETRY_COUNT)){
-        if(ae_ret == AE_ENCLAVE_LOST){
-            AESM_DBG_TRACE("enclave lost inside SGX Provisioning and reload PvE required");
-            CPVEClass::instance().unload_enclave();//force PVE to be reloaded later
-        }
-        if((ae_ret = CPVEClass::instance().load_enclave())!=AE_SUCCESS)
-        {
-            AESM_DBG_ERROR("load pve failed:%d",ae_ret);
-            break;
-        }
-        //estimate upbound size of ProvMsg1 and alloc memory for it
+    while(repeat < AESM_RETRY_COUNT){
+        //estimate upbound of ProvMsg1 and alloc memory for it
         msg_size = estimate_msg1_size(performance_rekey_used);
         AESM_DBG_TRACE("estimate msg1 size :%d",msg_size);
         assert(msg_size > 0);
@@ -346,15 +364,17 @@ ae_error_t PvEAESMLogic::epid_provision_thread_func(bool performance_rekey_used)
         memset(msg, 0, msg_size);
 
         //Generate ProvMsg1
-        ae_ret = static_cast<ae_error_t>(CPVEClass::instance().gen_prov_msg1(NULL, es_info.pek, performance_rekey_used, msg, msg_size));//Generate ProvMsg1
+        pve_data.is_backup_retrieval = false;
+        pve_data.is_performance_rekey = performance_rekey_used;
+        if(0!=memcpy_s(&pve_data.pek, sizeof(pve_data.pek), &es_info.pek, sizeof(es_info.pek))){
+            AESM_DBG_ERROR("memcpy error");
+            ae_ret = AE_FAILURE;
+            break;
+        }
+        ae_ret = static_cast<ae_error_t>(CPVEClass::instance().gen_prov_msg1(pve_data, msg, msg_size));//Generate ProvMsg1
         if (ae_ret != AE_SUCCESS)
         {
-            if(ae_ret == AE_ENCLAVE_LOST){
-                AESM_DBG_TRACE("Enclave lost after gen_prov_msg1");
-                retry++;
-                continue;
-            }
-            AESM_DBG_WARN("fail to generate prov msg1:%d",ae_ret);
+            AESM_DBG_WARN("fail to generate prov msg1:(ae%d)",ae_ret);
             break;
         }
         assert( msg != NULL && GET_SIZE_FROM_PROVISION_REQUEST(msg) >= PROVISION_REQUEST_HEADER_SIZE);
@@ -369,26 +389,20 @@ ae_error_t PvEAESMLogic::epid_provision_thread_func(bool performance_rekey_used)
         ae_ret = AESMNetworkEncoding::aesm_send_recv_msg_encoding(es_info.provision_url,
             msg,msg_size,  resp_msg, resp_size);//encoding/send ProvMsg1, receiving and decoding resp message
         if(ae_ret != AE_SUCCESS){
-            AESM_DBG_WARN("send msg1 via network fail:%d",ae_ret);
+            AESM_DBG_WARN("send msg1 via network fail:(ae%d)",ae_ret);
             break;//aesm_send_recv_se_msg will not return AE_ENCLAVE_LOST
         }
 
         assert (resp_msg != NULL && resp_size >= PROVISION_RESPONSE_HEADER_SIZE);
 
         if(GET_TYPE_FROM_PROVISION_RESPONSE(resp_msg) == TYPE_PROV_MSG2){//If responsed msg is ProvMsg2
-            psvn_t sigrl_svn;
             AESM_DBG_TRACE("start to process prov msg2, size %d", resp_size);
-            ae_ret = process_pve_msg2(sigrl_svn, resp_msg, resp_size, es_info);
+            ae_ret = process_pve_msg2(pve_data, resp_msg, resp_size, es_info);//processing following flow if response message is ProvMsg2
             if(ae_ret != AE_SUCCESS){
                 if(ae_ret == PVE_EPIDBLOB_ERROR){//If it reports old EPID Blob Error
                     AESM_DBG_TRACE("retrieve old epid blob");
-                    if((ae_ret = update_old_blob(sigrl_svn, es_info))!=AE_SUCCESS){//try to retrieve old EPID blob from backend server
-                        if(ae_ret == AE_ENCLAVE_LOST){
-                            AESM_DBG_TRACE("PvE Enclave lost in update_old_blob");
-                            retry++;
-                            continue;
-                        }
-                        AESM_DBG_WARN("fail to retrieve old epid blob:%d",ae_ret);
+                    if((ae_ret = update_old_blob(pve_data, es_info))!=AE_SUCCESS){//try to retrieve old EPID blob from backend server
+                        AESM_DBG_WARN("fail to retrieve old epid blob:(ae%d)",ae_ret);
                         break;
                     }else{
                         AESM_DBG_TRACE("retrieve old epid blob successfully");
@@ -396,24 +410,15 @@ ae_error_t PvEAESMLogic::epid_provision_thread_func(bool performance_rekey_used)
                         repeat++;//only retry after update old epid blob
                         continue;
                     }
-                }else if(ae_ret == AE_ENCLAVE_LOST){
-                    AESM_DBG_TRACE("PvE enclave lost in process_pve_msg2");
-                    retry++;
-                    continue;
                 }else{
-                    AESM_DBG_WARN("processing prov msg2 failed:%d",ae_ret);
+                    AESM_DBG_WARN("processing prov msg2 failed:(ae%d)",ae_ret);
                     break;
                 }
             }
         }else if(GET_TYPE_FROM_PROVISION_RESPONSE(resp_msg) == TYPE_PROV_MSG4){
             AESM_DBG_TRACE("start to process prov msg4 for current psvn");
-            if((ae_ret = process_pve_msg4(resp_msg,resp_size, NULL, false, NULL))!=AE_SUCCESS){//process ProvMsg4 to generate EPID blob if resp is Msg4
-                if(ae_ret == AE_ENCLAVE_LOST){
-                    AESM_DBG_TRACE("PvE Enclave lost in process_pve_msg4");
-                    retry++;
-                    continue;
-                }
-                AESM_DBG_WARN("fail to process prov msg4:%d",ae_ret);
+            if((ae_ret = process_pve_msg4(pve_data, resp_msg,resp_size))!=AE_SUCCESS){//process ProvMsg4 to generate EPID blob if resp is Msg4
+                AESM_DBG_WARN("fail to process prov msg4:(ae%d)",ae_ret);
                 break;
             }
         }else{
@@ -431,6 +436,8 @@ ae_error_t PvEAESMLogic::epid_provision_thread_func(bool performance_rekey_used)
         AESMNetworkEncoding::aesm_free_response_msg(resp_msg);
     }
     (void)aesm_stop_request_wake_execution();
+
+    log_provision_result(ae_ret);
     return ae_ret;
 
 }

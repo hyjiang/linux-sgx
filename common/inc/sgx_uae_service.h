@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -74,6 +74,21 @@ sgx_status_t SGXAPI sgx_init_quote(
 
 
 /*
+ * Function used to calculate quote size.
+ *
+ * @param p_sig_rl[in] OPTIONAL Signature Revocation List.
+ * @param sig_rl_size[in] Signature Revocation List size, in bytes.
+ * @param p_quote_size[out] Quote size, in bytes.
+ * @return If quote size is calculated,return SGX_SUCCESS, otherwise return
+ *            SGX_ERROR_INVALID_PARAMETER to indicate special error condition.
+ */
+sgx_status_t SGXAPI sgx_calc_quote_size(
+    const uint8_t *p_sig_rl,
+    uint32_t sig_rl_size,
+    uint32_t* p_quote_size);
+
+/*
+ * [DEPRECATED] Use sgx_calc_quote_size function instead of this one
  * Function used to get quote size.
  *
  * @param p_sig_rl[in] OPTIONAL Signature Revocation List.
@@ -81,6 +96,7 @@ sgx_status_t SGXAPI sgx_init_quote(
  * @return If quote size is calculated,return SGX_SCCUESS, otherwise return
  *            SGX_ERROR_INVALID_PARAMETER to indicate special error condition.
  */
+SGX_DEPRECATED
 sgx_status_t SGXAPI sgx_get_quote_size(
     const uint8_t *p_sig_rl,
     uint32_t* p_quote_size);
@@ -121,6 +137,31 @@ sgx_status_t SGXAPI sgx_get_quote(
  */
 sgx_status_t SGXAPI sgx_get_ps_cap(sgx_ps_cap_t* p_sgx_ps_cap);
 
+/**
+ * Get the white list's size
+ *
+ * @param p_whitelist_size Save the size of the white list.
+ * @return if OK, return SGX_SUCCESS
+ */
+sgx_status_t SGXAPI sgx_get_whitelist_size(uint32_t* p_whitelist_size);
+
+/**
+ * Get the white list value
+ *
+ * @param p_whitelist Save the white list value
+ * @param whitelist_size The size of the white list and the read data size is whitelist_size
+ * @return if OK, return SGX_SUCCESS
+ */
+sgx_status_t SGXAPI sgx_get_whitelist(uint8_t* p_whitelist, uint32_t whitelist_size);
+
+/**
+ * Get the extended epid group id
+ *
+ * @param p_extended_epid_group_id Save the extended epid group id.
+ * @return if OK, return SGX_SUCCESS
+ */
+sgx_status_t SGXAPI sgx_get_extended_epid_group_id(uint32_t* p_extended_epid_group_id);
+
 #define SGX_IS_TRUSTED_TIME_AVAILABLE(cap)           ((((uint32_t)PS_CAP_TRUSTED_TIME)&((cap).ps_cap0))!=0)
 #define SGX_IS_MONOTONIC_COUNTER_AVAILABLE(cap)      ((((uint32_t)PS_CAP_MONOTONIC_COUNTER)&((cap).ps_cap0))!=0)
 
@@ -138,6 +179,14 @@ sgx_status_t SGXAPI sgx_report_attestation_status(
     int attestation_status,
     sgx_update_info_bit_t* p_update_info);
 
+/**
+ * Register white list certificate chain
+ *
+ * @param p_wl_cert_chain The white list to be registered.
+ * @param wl_cert_chain_size The size of the white list.
+ * @return If OK, return SGX_SUCCESS
+ */
+sgx_status_t SGXAPI sgx_register_wl_cert_chain(uint8_t* p_wl_cert_chain, uint32_t wl_cert_chain_size);
 
 #ifdef  __cplusplus
 }

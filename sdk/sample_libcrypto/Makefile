@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+# Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -32,18 +32,23 @@
 
 include ../../buildenv.mk
 
-CRYPTO_PATH = $(LINUX_EXTERNAL_DIR)/crypto_px
 
 CXXFLAGS += -Werror -fno-rtti -fno-exceptions -fPIC
 
-CPPFLAGS := -isystem $(CRYPTO_PATH)/include \
+CPPFLAGS := -isystem $(SGX_IPP_INC) \
             -I$(COMMON_DIR)/inc/internal/           
 
-IPPFLAGS := -Wl,--start-group  \
-            $(CRYPTO_PATH)/libcrypto_px.a \
-            -Wl,--end-group 
+CFLAGS +=  -fPIC -Werror -fno-exceptions -I$(SGX_IPP_INC)
+
+LDFLAGS := -Bdynamic -L$(IPP_LIBS_DIR) $(LD_IPP) 
+LDFLAGS += $(COMMON_LDFLAGS) -Wl,--version-script,sample_libcrypto.lds -Wl,--gc-sections
 
 OBJS := sample_libcrypto.o
+
+IPPDISP_DIR := $(LINUX_SDK_DIR)/tlibcrypto/ipp/ipp_disp
+C_SRC := $(wildcard $(IPPDISP_DIR)/*.c)
+C_OBJS  := $(patsubst $(IPPDISP_DIR)/%.c, %.o, $(C_SRC))
+C_OBJS  := $(sort $(C_OBJS))
 
 LIBSAMPLECRYPTO := libsample_libcrypto.so
 
@@ -54,20 +59,20 @@ $(BUILD_DIR):
 all: $(LIBSAMPLECRYPTO) | $(BUILD_DIR)
 	@$(CP) $< $|
 
-libcrypto_px:
-	$(MAKE) -C $(CRYPTO_PATH)
+$(LIBSAMPLECRYPTO): $(OBJS) $(C_OBJS)
+	$(CXX) $(CXXFLAGS) -shared -Wl,-soname,$(LIBSAMPLECRYPTO) $^ -o $@ $(LDFLAGS)	
 
-# It's important that the IPPFLAGS go AFTER the .o / .cpp file(s)
-$(LIBSAMPLECRYPTO): $(OBJS) libcrypto_px
-	$(CXX) $(CXXFLAGS) -shared -Bdynamic -Wl,-soname,$(LIBSAMPLECRYPTO) $< -o $@ $(IPPFLAGS) -Wl,--version-script,sample_libcrypto.lds
+$(C_OBJS): %.o: $(IPPDISP_DIR)/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
 
 $(OBJS): %.o: %.cpp
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -c $< -o $@
 
 .PHONY: clean
 clean:
-	$(MAKE) -C $(CRYPTO_PATH)  clean
-	@$(RM) $(OBJS) $(LIBSAMPLECRYPTO) $(BUILD_DIR)/$(LIBSAMPLECRYPTO)
+	@$(RM) $(OBJS) $(C_OBJS) $(LIBSAMPLECRYPTO) $(BUILD_DIR)/$(LIBSAMPLECRYPTO)
 
 .PHONY: rebuild
-rebuild: clean all
+rebuild:
+	$(MAKE) clean
+	$(MAKE) all

@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+# Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -40,33 +40,45 @@ else
 endif
 
 .PHONY: all
-all: $(CURL_RESULT) LE AESM COPY_PVE_QE| $(BUILD_DIR)
+ifeq ($(BUILD_REF_LE), 1)
+all: $(CURL_RESULT) AESM REF_LE COPY_AES CSE| $(BUILD_DIR)
+else
+all: $(CURL_RESULT) AESM COPY_AES CSE| $(BUILD_DIR)
+endif #($(BUILD_REF_LE), 1)
 
-.PHONY: COPY_PVE_QE
-COPY_PVE_QE: | $(BUILD_DIR)
+# COPY_AES: currently copy le, qe, pve, pce, pse_op, pse_pr, pse_pr_2
+.PHONY: COPY_AES
+COPY_AES: | $(BUILD_DIR)
 	$(CP) data/prebuilt/* $(BUILD_DIR)
 
 .PHONY: AESM
-AESM: LE | $(BUILD_DIR)
+AESM: | $(BUILD_DIR)
 	$(MAKE) -C aesm_service
 	$(CP) aesm_service/config/aesmd_service/aesmd.conf $(BUILD_DIR)
 	$(CP) aesm_service/config/aesmd_service/aesmd.service $(BUILD_DIR)
 
-.PHONY: LE
-LE:
-	$(MAKE) -C le
+.PHONY: REF_LE
+REF_LE:
+	$(MAKE) -C ref_le
+
+.PHONY: CSE
+CSE: | $(BUILD_DIR)
+	$(MAKE) -C cse_provision_tool
+	@$(CP) cse_provision_tool/cse_provision_tool $|
 
 $(BUILD_DIR):
 	@$(MKDIR) $@
 
 .PHONY: clean
-clean::
-	$(MAKE) -C le                              clean
+clean:
 	$(MAKE) -C aesm_service/                   clean
-	$(RM)   common/version.cpp
+	$(MAKE) -C cse_provision_tool              clean
+	$(MAKE) -C ref_le                          clean
 
 .PHONY: rebuild
-rebuild: clean all
+rebuild:
+	$(MAKE) clean
+	$(MAKE) all
 
 .PHONY: check_fail
 check_fail:

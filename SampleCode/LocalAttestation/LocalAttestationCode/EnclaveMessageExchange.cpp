@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -61,7 +61,6 @@ uint32_t verify_peer_enclave_trust(sgx_dh_session_enclave_identity_t* peer_encla
 uint32_t g_session_count = 0;
 
 ATTESTATION_STATUS generate_session_id(uint32_t *session_id);
-ATTESTATION_STATUS end_session(sgx_enclave_id_t src_enclave_id);
 
 //Array of open session ids
 session_id_tracker_t *g_session_id_tracker[MAX_SESSION_COUNT];

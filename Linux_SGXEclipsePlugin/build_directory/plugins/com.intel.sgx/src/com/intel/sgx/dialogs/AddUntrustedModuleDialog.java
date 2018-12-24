@@ -1,5 +1,5 @@
 ///////////////////////////////////////////////////////////////////////////
-// Copyright (c) 2016 Intel Corporation.				 //
+// Copyright (c) 2018 Intel Corporation.				 //
 // 									 //
 // All rights reserved. This program and the accompanying materials	 //
 // are made available under the terms of the Eclipse Public License v1.0 //
@@ -112,7 +112,7 @@ public class AddUntrustedModuleDialog extends Dialog {
 	@Override
 	protected void configureShell(Shell newShell) {
 		super.configureShell(newShell);
-		newShell.setText("Add SGX Untrusted Module.");
+		newShell.setText("Add Intel(R) SGX Untrusted Module.");
 	}
 	
 	@Override

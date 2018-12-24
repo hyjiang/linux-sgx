@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -31,6 +31,7 @@
 
 
 #include "aesm_epid_blob.h"
+#include "aesm_xegd_blob.h"
 #include "qe_logic.h"
 #include "pve_logic.h"
 #include "aesm_logic.h"
@@ -48,7 +49,7 @@ static ae_error_t get_qe_target(sgx_target_info_t *p_qe_target)
 
     if((ae_ret = CQEClass::instance().load_enclave())!=AE_SUCCESS)
     {
-        AESM_DBG_ERROR("Fail to load QE:%d",ae_ret);
+        AESM_DBG_ERROR("Fail to load QE:(ae%d)",ae_ret);
         return ae_ret;
     }
     ae_ret = static_cast<ae_error_t>(CQEClass::instance().get_qe_target(p_qe_target));
@@ -75,13 +76,13 @@ static aesm_error_t try_reprovision_if_not(bool& updated, epid_blob_with_cur_psv
     // we need to start the provision process.
     if((aesm_result = PvEAESMLogic::provision(false, THREAD_TIMEOUT))!=AESM_SUCCESS){
         
-        AESM_DBG_ERROR("pve provision failed:%d", aesm_result);
+        AESM_DBG_ERROR("pve provision failed:(aesm%d)", aesm_result);
         return aesm_result;
     }
     updated = true;
     // Update the epid blob after a successful provisioning.
     if((ae_ret = EPIDBlob::instance().read(epid_data))!=AE_SUCCESS){
-        AESM_DBG_ERROR("read epid blob failed:%d", ae_ret);
+        AESM_DBG_ERROR("read epid blob failed:(ae%d)", ae_ret);
         return AESM_EPIDBLOB_ERROR;
     }
     return AESM_SUCCESS;
@@ -92,7 +93,7 @@ static aesm_error_t try_reprovision_if_not(bool& updated, epid_blob_with_cur_psv
 // the qe_isv_svn or cpu_svn don't match that in Epid Data Blob
 aesm_error_t QEAESMLogic::init_quote(
     sgx_target_info_t *target,
-    uint8_t *gid, uint32_t gid_size,
+    uint8_t *gid, uint32_t gid_size, uint16_t pce_isv_svn,
     uint16_t qe_isv_svn, const sgx_cpu_svn_t qe_cpu_svn)
 {
     ae_error_t ae_ret = AE_SUCCESS;
@@ -107,26 +108,72 @@ aesm_error_t QEAESMLogic::init_quote(
     bool updated = false;
     memset(&epid_data,0,sizeof(epid_data));
 
+    uint32_t xegd_xeid = AESMLogic::get_active_extended_epid_group_id();
     AESM_DBG_TRACE("start read and verify old epid blob");
-    if((ae_ret = epid_blob.read(epid_data))!=AE_SUCCESS){
-        if(AESM_SUCCESS!=(aesm_result = try_reprovision_if_not(updated, epid_data))){
+    uint32_t epid_xeid = 0;
+    //EPID BLOB not exist
+    if ((ae_ret = epid_blob.read(epid_data)) != AE_SUCCESS ){
+        if (AESM_SUCCESS != (aesm_result = try_reprovision_if_not(updated, epid_data))){
+            goto ret_point;
+        }
+    }
+    //ExtEPIDGroupID not match
+    else if ((ae_ret = epid_blob.get_extended_epid_group_id(&epid_xeid)) == AE_SUCCESS &&
+        xegd_xeid != epid_xeid)
+    {
+        (void)epid_blob.remove();
+        if (AESM_SUCCESS != (aesm_result = try_reprovision_if_not(updated, epid_data))){
             goto ret_point;
         }
     }
 
     if((ae_ret = CQEClass::instance().load_enclave())!=AE_SUCCESS)
     {
-        AESM_DBG_ERROR("Fail to load QE:%d", ae_ret);
-        aesm_result = AESM_UNEXPECTED_ERROR;
+        AESM_DBG_ERROR("Fail to load QE:(ae%d)", ae_ret);
+        if(ae_ret == AESM_AE_OUT_OF_EPC)
+            aesm_result = AESM_OUT_OF_EPC;
+        else
+            aesm_result = AESM_UNEXPECTED_ERROR;
         goto ret_point;
     }
+    if (epid_data.cur_pi.pve_svn == 4) { // Detect the EPID blob is provisioned by PSW 1.6
+        sgx_sealed_data_t *sealed_epid = reinterpret_cast<sgx_sealed_data_t *>(epid_data.trusted_epid_blob);
+        uint32_t plain_text_offset = sealed_epid->plain_text_offset;
+        se_plaintext_epid_data_sdk_t* plain_text_sdk = reinterpret_cast<se_plaintext_epid_data_sdk_t*>(epid_data.trusted_epid_blob + sizeof(sgx_sealed_data_t) + plain_text_offset);
+        if(plain_text_sdk->epid_key_version == EPID_KEY_BLOB_VERSION_SDK){ // Detect the EPID blob has been converted into SDK format, which is problematic
+            (void)epid_blob.remove();
+            if (AESM_SUCCESS != (aesm_result = try_reprovision_if_not(updated, epid_data))) {
+                goto ret_point;
+            }
+        }
+    }
+
+    ae_ret = get_qe_target(target);
+    if(ae_ret!=AE_SUCCESS){
+        AESM_DBG_ERROR("get qe target failed (ae%d)",ae_ret);
+        if(ae_ret==AESM_AE_OUT_OF_EPC)
+            aesm_result = AESM_OUT_OF_EPC;
+        else
+            aesm_result = AESM_UNEXPECTED_ERROR;
+        goto ret_point;
+    }
+    AESM_DBG_TRACE("get qe_target flags:%llx xfrm:%llx",
+                   target->attributes.flags, target->attributes.xfrm);
+
+    se_static_assert(SGX_TRUSTED_EPID_BLOB_SIZE_SDK>=SGX_TRUSTED_EPID_BLOB_SIZE_SIK);
     ae_ret = static_cast<ae_error_t>(CQEClass::instance().verify_blob(epid_data.trusted_epid_blob,
-        SGX_TRUSTED_EPID_BLOB_SIZE,
+        SGX_TRUSTED_EPID_BLOB_SIZE_SDK,
         &resealed));
     if(ae_ret == QE_EPIDBLOB_ERROR){
+        (void)epid_blob.remove();
         if(AESM_SUCCESS!=(aesm_result = try_reprovision_if_not(updated, epid_data))){
             goto ret_point;
         }
+    }
+    else if(ae_ret == AESM_AE_OUT_OF_EPC)
+    {
+        aesm_result = AESM_OUT_OF_EPC;
+        goto ret_point;
     }
     else if(ae_ret != AE_SUCCESS) 
     {
@@ -138,29 +185,15 @@ aesm_error_t QEAESMLogic::init_quote(
     assert(sizeof(uint32_t) ==  gid_size);
     UNUSED(gid_size);
 
-    if (AE_SUCCESS != EPIDBlob::instance().get_sgx_gid((uint32_t*) gid)) {
-        aesm_result = AESM_UNEXPECTED_ERROR;
-        goto ret_point;
-    }
-
-    AESM_DBG_TRACE("get gid %d from epid blob (little-endian)",
-                    *(uint32_t*) gid);
-
-    if(get_qe_target(target)!=AE_SUCCESS){
-        AESM_DBG_ERROR("get qe target failed");
-        aesm_result = AESM_UNEXPECTED_ERROR;
-        goto ret_point;
-    }
-    AESM_DBG_TRACE("get qe_target flags:%llx xfrm:%llx",
-                   target->attributes.flags, target->attributes.xfrm);
     //Any Quoting enclave related code must be before this section to avoid QE/PvE unloading each other
-    //Do the upgrade reprovision if required
-    AESM_DBG_TRACE("qe_isv_svn %d, epid_isv_svn %df",qe_isv_svn, epid_data.cur_psvn.isv_svn);
-    if((qe_isv_svn > epid_data.cur_psvn.isv_svn)
-       || (0!=memcmp(&qe_cpu_svn, &epid_data.cur_psvn.cpu_svn,
+    //do the upgrade reprovision after all Quoting Enclave works
+    AESM_DBG_TRACE("qe_isv_svn %d, epid_isv_svn %d",qe_isv_svn, epid_data.cur_pi.pve_svn);
+    if((qe_isv_svn > epid_data.cur_pi.pve_svn)
+       || (pce_isv_svn > epid_data.cur_pi.pce_svn)
+       || (0!=memcmp(&qe_cpu_svn, &epid_data.cur_pi.cpu_svn,
            sizeof(sgx_cpu_svn_t))))
     {
-        //We will ignore all provision failure when there is a working EPID blob and leave the decision to attestation server
+        
         if(AESM_SUCCESS == (aesm_result = try_reprovision_if_not(updated, epid_data))){
             resealed = false;
         }else if(AESM_PROXY_SETTING_ASSIST == aesm_result ||
@@ -172,10 +205,19 @@ aesm_error_t QEAESMLogic::init_quote(
     //Any Quoting enclave related code must be before this section to avoid QE/PvE unloading each other */
     aesm_result = AESM_SUCCESS;
 ret_point:
-    if(resealed && aesm_result == AESM_SUCCESS){
-        AESM_DBG_TRACE("Update epid blob");
-        if((ae_ret=epid_blob.write(epid_data))!=AE_SUCCESS){
-            AESM_DBG_WARN("Fail to update epid blob:%d",ae_ret);
+    if(aesm_result == AESM_SUCCESS){
+        if (resealed) {
+            AESM_DBG_TRACE("Update epid blob");
+            if ((ae_ret = epid_blob.write(epid_data)) != AE_SUCCESS) {
+                AESM_DBG_WARN("Fail to update epid blob:(ae%d)", ae_ret);
+            }
+        }
+        if (AE_SUCCESS != EPIDBlob::instance().get_sgx_gid((uint32_t*)gid)) {
+            aesm_result = AESM_UNEXPECTED_ERROR;
+        }
+        else {
+            AESM_DBG_TRACE("get gid %d from epid blob (little-endian)",
+                *(uint32_t*)gid);
         }
     }
     return aesm_result;
@@ -189,7 +231,7 @@ aesm_error_t QEAESMLogic::get_quote(const uint8_t *report,
                                     const uint8_t *nonce,
                                     const uint8_t *sigrl, uint32_t sigrl_size,
                                     uint8_t *qe_report,
-                                    uint8_t *quote, uint32_t buf_size)
+                                    uint8_t *quote, uint32_t buf_size, uint16_t pce_isv_svn)
 {
     epid_blob_with_cur_psvn_t epid_data;
     uint32_t ae_ret = AE_SUCCESS;
@@ -204,20 +246,23 @@ aesm_error_t QEAESMLogic::get_quote(const uint8_t *report,
     if((ae_ret = epid_blob.read(epid_data))!=AE_SUCCESS){
         if((aesm_result = PvEAESMLogic::provision(false, THREAD_TIMEOUT))!=AESM_SUCCESS){
             
-            AESM_DBG_ERROR("pve provision failed:%d", aesm_result);
+            AESM_DBG_ERROR("pve provision failed:(aesm%d)", aesm_result);
             goto CLEANUP;
         }
     }
 
-    if(CQEClass::instance().load_enclave())
+    if((ae_ret = CQEClass::instance().load_enclave())!=AE_SUCCESS)
     {
-        AESM_DBG_ERROR("load QE failed");
-        aesm_result = AESM_UNEXPECTED_ERROR;
+        AESM_DBG_ERROR("load QE failed(ae%d)",ae_ret);
+        if(ae_ret == AESM_AE_OUT_OF_EPC)
+            aesm_result = AESM_OUT_OF_EPC;
+        else
+            aesm_result = AESM_UNEXPECTED_ERROR;
         goto CLEANUP;
     }
     AESM_DBG_TRACE("start to get quote");
     ae_ret = CQEClass::instance().get_quote(epid_data.trusted_epid_blob,
-        SGX_TRUSTED_EPID_BLOB_SIZE,
+        SGX_TRUSTED_EPID_BLOB_SIZE_SDK,
         reinterpret_cast<const sgx_report_t *>(report),
         static_cast<sgx_quote_sign_type_t>(quote_type),
         reinterpret_cast<const sgx_spid_t *>(spid),
@@ -226,10 +271,10 @@ aesm_error_t QEAESMLogic::get_quote(const uint8_t *report,
         sigrl_size,
         reinterpret_cast<sgx_report_t *>(qe_report),
         quote,
-        buf_size);
+        buf_size, pce_isv_svn);
     if(ae_ret != AE_SUCCESS)
     {
-        AESM_DBG_TRACE("get_quote failed:%d",ae_ret);
+        AESM_DBG_TRACE("get_quote failed:(ae%d)",ae_ret);
         if(ae_ret == QE_EPIDBLOB_ERROR)
             aesm_result = AESM_EPIDBLOB_ERROR;
         else if(ae_ret == QE_PARAMETER_ERROR)

@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+# Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -31,40 +31,110 @@
 
 include ../../buildenv.mk
 
-CRYPTO_PATH = $(LINUX_EXTERNAL_DIR)/crypto_px
-
-CXXFLAGS += $(ENCLAVE_CXXFLAGS) -Werror -fno-exceptions -fno-rtti
-
 CPPFLAGS := -I$(COMMON_DIR)/inc/internal \
             -I$(COMMON_DIR)/inc          \
             -I$(COMMON_DIR)/inc/tlibc    \
-            -I$(CRYPTO_PATH)/include
+            -I$(LINUX_EXTERNAL_DIR)/ippcp_internal/inc
 
-OBJ = init_crypto_lib.o sgx_aes_ctr.o sgx_aes_gcm.o sgx_cmac128.o sgx_ecc256.o sgx_ecc256_common.o sgx_ecc256_ecdsa.o sgx_sha256.o sgx_sha256_msg.o tcrypto_version.o
+CXXFLAGS += $(ENCLAVE_CXXFLAGS) -Werror -fno-exceptions -fno-rtti
 
+OBJ = init_tcrypto_lib.o sgx_aes_ctr.o sgx_rsa_encryption.o sgx_aes_gcm.o sgx_cmac128.o sgx_hmac.o sgx_ecc256.o sgx_ecc256_ecdsa.o sgx_sha256.o sgx_sha1.o sgx_sha256_msg.o sgx_ecc256_internal.o sgx_rsa3072.o sgx_internal.o
+SHARED_OBJ = tcrypto_version.o sgx_common_init_ipp.o
+
+ifneq ($(USE_OPT_LIBS), 1)
+
+# Added to build with SgxSSL libraries
+ifeq ($(ARCH), x86_64)
+	OPENSSL_PACKAGE = $(LINUX_EXTERNAL_DIR)/sgxssl/Linux/package
+else
+	$(error SGXSSL doesn't support 32bit)
+endif #($(ARCH), x86_64)
+OPENSSL_LIBRARY_PATH := $(OPENSSL_PACKAGE)/lib64/
+ifdef DEBUG
+	OpenSSL_Crypto_Library_Name := sgx_tsgxssl_cryptod
+	SGXSSL_Library_Name := sgx_tsgxssld
+	SGX_COMMON_CFLAGS += -O0
+else
+	OpenSSL_Crypto_Library_Name := sgx_tsgxssl_crypto
+	SGXSSL_Library_Name := sgx_tsgxssl
+endif
+
+PREPARE_SGXSSL := $(LINUX_EXTERNAL_DIR)/sgxssl/prepare_sgxssl.sh
+PREPRARE_SGX_SSL:
+	chmod 755 $(PREPARE_SGXSSL)
+	test -f $(OPENSSL_LIBRARY_PATH)/lib$(SGXSSL_Library_Name).a || $(PREPARE_SGXSSL)
+
+CPPFLAGS += -I$(OPENSSL_PACKAGE)/include -fPIC
+CXXFLAGS += -DUSE_SGXSSL
+SRCDIR := sgxssl
+
+LIB_NAME := libsgx_tcrypto_sgxssl.a
+
+else
+
+CPPFLAGS += -I$(SGX_IPP_INC)
+CFLAGS += $(CPPFLAGS) $(ENCLAVE_CFLAGS) $(SGX_COMMON_CFLAGS) -Werror -fno-exceptions -fPIC
+
+OBJ += sgx_tcrypto_common.o sgx_rsa_internal.o
+SRCDIR := ipp
+
+LIB_NAME := libsgx_tcrypto_ipp.a
+
+endif #!($(USE_OPT_LIBS), 1)
+
+C_Files := $(wildcard ipp/ipp_disp/*.c)
+C_OBJS  := $(C_Files:.c=.o)
+C_OBJS  := $(sort $(C_OBJS))
+
+DISP_LIB_NAME := libsgx_disp.a
+
+OBJ := $(addprefix $(SRCDIR)/, $(OBJ))
+LIB_NAME := $(addprefix $(SRCDIR)/, $(LIB_NAME))
 TARGET := libsgx_tcrypto.a
 
-libcrypto_px:
-	$(MAKE) -C $(CRYPTO_PATH)
+ifneq ($(USE_OPT_LIBS), 1)
 
-$(TARGET): $(OBJ) libcrypto_px
-	@$(CP) $(CRYPTO_PATH)/libcrypto_px.a $@
-	$(AR) rsD $@ $(OBJ)
+$(TARGET): PREPRARE_SGX_SSL 
+	$(MAKE) $(OBJ) 
+	$(MAKE) $(SHARED_OBJ)
+	$(MKDIR) $(BUILD_DIR)/.libs
+	$(RM) $(BUILD_DIR)/.libs/*
+	cd $(BUILD_DIR)/.libs && \
+	$(AR) x $(OPENSSL_LIBRARY_PATH)/lib$(OpenSSL_Crypto_Library_Name).a && \
+	$(AR) x $(OPENSSL_LIBRARY_PATH)/lib$(SGXSSL_Library_Name).a 
+	$(AR) rsD $(LIB_NAME) $(OBJ) $(SHARED_OBJ) $(BUILD_DIR)/.libs/*.o
+	$(CP) $(LIB_NAME) $@
+	$(RM) -r $(BUILD_DIR)/.libs 
+else
 
-$(OBJ): %.o: %.cpp
+$(TARGET): $(OBJ) $(SHARED_OBJ) $(C_OBJS)
+	@$(CP) $(IPP_LIBS_DIR)/libippcp.a $(LIB_NAME)
+	$(AR) rsD $(LIB_NAME) $(OBJ) $(SHARED_OBJ) $(C_OBJS)
+	$(CP) $(LIB_NAME) $@
+
+endif #!($(USE_OPT_LIBS), 1)
+
+$(DISP_LIB_NAME): $(C_OBJS)
+	$(AR) rsD $(DISP_LIB_NAME) $(C_OBJS)
+
+$(SRCDIR)/%.o: $(SRCDIR)/%.cpp
+	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $< -o $@
+
+$(SHARED_OBJ): %.o: %.cpp
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $< -o $@
 
 $(BUILD_DIR):
 	@$(MKDIR) $@
 
 .PHONY: all
-all: $(TARGET) | $(BUILD_DIR)
-	@$(CP) $< $|
+all: $(TARGET) $(DISP_LIB_NAME) | $(BUILD_DIR)
+	@$(CP) $^ $|
 
 .PHONY: clean
 clean:
-	$(MAKE) -C $(CRYPTO_PATH)  clean
-	@$(RM) *.o $(TARGET) $(BUILD_DIR)/$(TARGET)
+	@$(RM) *.o ipp/*.o ipp/ipp_disp/*.o sgxssl/*.o $(TARGET) $(BUILD_DIR)/$(TARGET) $(LIB_NAME) $(DISP_LIB_NAME) $(BUILD_DIR)/$(DISP_LIB_NAME)
 
 .PHONY: rebuild
-rebuild: clean all
+rebuild:
+	$(MAKE) clean
+	$(MAKE) all

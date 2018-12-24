@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+# Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -50,10 +50,12 @@ LDCFLAGS  := -shared -nostdlib -nodefaultlibs -nostartfiles
 
 CPP_SRCS  := $(wildcard ../*.cpp)
 C_SRCS    := $(wildcard *.c)
-ASM_SRCS  := $(wildcard *.S)
+ASM_SRCS  := $(wildcard *.S) \
+             $(COMMON_DIR)/src/linux/xsave_gnu.S
 OBJS      := $(CPP_SRCS:.cpp=.o)
 OBJS      += $(C_SRCS:.c=.o)
 OBJS      += $(ASM_SRCS:.S=.o)
+OBJS      := $(sort $(OBJS))
 
 LIBTRTS = libsgx_trts.a
 
@@ -66,6 +68,7 @@ $(LIBTRTS): $(OBJS) setcontext.o
 	$(AR) rsD $@ $(ARCH)/setcontext.o
 
 %.o: %.S
+	echo $(ASM_SRCS)
 	$(CC) $(CFLAGS) $(TCFLAGS) -c $< -o $@
 
 %.o: %.c
@@ -87,5 +90,7 @@ clean:
 	$(MAKE) -C $(ARCH) clean
 
 .PHONY: rebuild
-rebuild: clean all
+rebuild:
+	$(MAKE) clean
+	$(MAKE) all
 

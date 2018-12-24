@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -59,6 +59,26 @@ extern "C" {
  *     sgx_status_t  - SGX_SUCCESS or failure as defined in sgx_error.h.
 */
 sgx_status_t SGXAPI sgx_create_report(const sgx_target_info_t *target_info, const sgx_report_data_t *report_data, sgx_report_t *report);
+
+
+/*sgx_self_report
+ * Purpose: Create a self cryptographic report of the enclave
+ *
+ * Return value:
+ *     sgx_report_t*  - Pointer for the self report
+ */
+const sgx_report_t *sgx_self_report(void);
+
+/*  sgx_self_target
+ *  Purpose: Generate a self target info from the self cryptographic report of the enclave.
+ *
+ *  Paramters:
+ *       target_info - [OUT] Pointer to the output target info
+ *
+ *  Return value:
+ *      sgx_status_t  - SGX_SUCCESS or failure as defined in sgx_error.h.
+ */
+sgx_status_t SGXAPI sgx_self_target(sgx_target_info_t *target_info);
 
 /* sgx_verify_report
  * Purpose: Software verification for  the input report

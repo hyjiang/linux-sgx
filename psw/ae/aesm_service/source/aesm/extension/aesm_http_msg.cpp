@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -59,6 +59,9 @@ static size_t write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
     network_malloc_info_t* s=reinterpret_cast<network_malloc_info_t *>(stream);
     uint32_t start=0;
     if(s->base==NULL){
+        if(UINT32_MAX/size<nmemb){
+              return 0;//buffer overflow
+        }
         s->base = reinterpret_cast<char *>(malloc(size*nmemb));
         s->size = static_cast<uint32_t>(size*nmemb);
         if(s->base==NULL){
@@ -67,6 +70,11 @@ static size_t write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
         }
     }else{
         uint32_t newsize = s->size+static_cast<uint32_t>(size*nmemb);
+        if((UINT32_MAX-s->size)/size<nmemb){
+            free(s->base);
+            s->base = NULL;
+            return 0;//buffer overflow
+        }
         char *p=reinterpret_cast<char *>(malloc(newsize));
         if(p == NULL){
             free(s->base);
@@ -74,13 +82,13 @@ static size_t write_callback(void *ptr, size_t size, size_t nmemb, void *stream)
             AESM_DBG_ERROR("malloc error in write callback fun");
             return 0;
         }
-        memcpy(p, s->base, s->size);
+        memcpy_s(p, newsize, s->base, s->size);
         free(s->base);
         start = s->size;
         s->base = p;
         s->size = newsize;
     }
-    memcpy(s->base +start, ptr, size*nmemb);
+    memcpy_s(s->base +start, s->size-start, ptr, size*nmemb);
     return nmemb;
 }
 
@@ -92,6 +100,10 @@ static ae_error_t http_network_init(CURL **curl, const char *url, bool is_ocsp)
     if(!is_curl_initialized_succ()){
         AESM_DBG_ERROR("libcurl not initialized");
         return AE_FAILURE;//fatal error that libcurl could not be initialized
+    }
+    if(NULL == url){
+        AESM_DBG_ERROR("NULL url");
+        return AE_FAILURE;
     }
     std::string url_path = url;
     uint32_t proxy_type;
@@ -105,6 +117,7 @@ static ae_error_t http_network_init(CURL **curl, const char *url, bool is_ocsp)
     }
     if((cc=curl_easy_setopt(*curl, CURLOPT_URL, url_path.c_str()))!=CURLE_OK){
        AESM_DBG_ERROR("fail error code %d in set url %s",(int)cc, url_path.c_str());
+       curl_easy_cleanup(*curl);
        return AE_FAILURE;
     }
     (void)curl_easy_setopt(*curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
@@ -123,44 +136,63 @@ static ae_error_t http_network_send_data(CURL *curl, const char *req_msg, uint32
 {
     AESM_DBG_TRACE("send data method=%d",method);
     struct curl_slist *headers=NULL;
+    struct curl_slist *tmp=NULL;
+    ae_error_t ae_ret = AE_SUCCESS;
     CURLcode cc=CURLE_OK;
+    int num_bytes = 0;
+    long resp_code = 0;
     if(is_ocsp){
-        headers = curl_slist_append(headers, "Accept: application/ocsp-response");
-        if(headers==NULL){
+        tmp = curl_slist_append(headers, "Accept: application/ocsp-response");
+        if(tmp==NULL){
             AESM_DBG_ERROR("fail in add accept ocsp-response header");
-            return AE_FAILURE;
+            ae_ret = AE_FAILURE;
+            goto fini;
         }
-        headers = curl_slist_append(headers, "Content-Type: application/ocsp-request");
-        if(headers == NULL){
+        headers = tmp;
+        tmp = curl_slist_append(headers, "Content-Type: application/ocsp-request");
+        if(tmp == NULL){
            AESM_DBG_ERROR("fail in add content type ocsp-request");
-           return AE_FAILURE;
+           ae_ret = AE_FAILURE;
+           goto fini;
         }
+        headers=tmp;
         AESM_DBG_TRACE("ocsp request");
     }
     char buf[50];
-    sprintf(buf, "Content-Length: %u", (unsigned int)msg_size);
-    headers = curl_slist_append(headers, buf);
-    if(headers == NULL){
-         AESM_DBG_ERROR("fail to add content-length header");
-         return AE_FAILURE;
+    num_bytes = snprintf(buf,sizeof(buf), "Content-Length: %u", (unsigned int)msg_size);
+    if(num_bytes<0 || num_bytes>=(int)sizeof(buf)){
+         AESM_DBG_ERROR("fail to prepare string Content-Length");
+         ae_ret = AE_FAILURE;
+         goto fini;
     }
+    tmp = curl_slist_append(headers, buf);
+    if(tmp == NULL){
+         AESM_DBG_ERROR("fail to add content-length header");
+         ae_ret = AE_FAILURE;
+         goto fini;
+    }
+    headers=tmp;
     if((cc=curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers))!=CURLE_OK){
         AESM_DBG_ERROR("fail to set http header:%d",(int)cc);
-        return AE_FAILURE;
+        ae_ret = AE_FAILURE;
+        goto fini;
     }
     if(method == POST){
         if((cc=curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req_msg))!=CURLE_OK){
             AESM_DBG_ERROR("fail to set POST fields:%d",(int)cc);
-            return AE_FAILURE;
+            ae_ret = AE_FAILURE;
+            goto fini;
         }
         if((cc=curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, msg_size))!=CURLE_OK){
             AESM_DBG_ERROR("fail to set POST fields size:%d",(int)cc);
-            return AE_FAILURE;
+            ae_ret = AE_FAILURE;
+            goto fini;
         }
     }
     if((cc=curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback))!=CURLE_OK){
         AESM_DBG_ERROR("Fail to set callback function:%d",(int)cc);
-        return AE_FAILURE;
+        ae_ret = AE_FAILURE;
+        goto fini;
     }
 
     network_malloc_info_t malloc_info;
@@ -168,19 +200,38 @@ static ae_error_t http_network_send_data(CURL *curl, const char *req_msg, uint32
     malloc_info.size = 0;
     if((cc=curl_easy_setopt(curl, CURLOPT_WRITEDATA, reinterpret_cast<void *>(&malloc_info)))!=CURLE_OK){
        AESM_DBG_ERROR("fail to set write back function parameter:%d",(int)cc);
-       return AE_FAILURE;
+       ae_ret = AE_FAILURE;
+       goto fini;
     }
     if((cc=curl_easy_perform(curl))!=CURLE_OK){
         if(malloc_info.base){
             free(malloc_info.base);
         }
         AESM_DBG_ERROR("fail in connect:%d",(int)cc);
-        return OAL_NETWORK_UNAVAILABLE_ERROR;
+        ae_ret = OAL_NETWORK_UNAVAILABLE_ERROR;
+        goto fini;
     }
+    // Check HTTP response code
+    // For example, if the remote file does not exist, curl may return CURLE_OK but the http response code 
+    // indicates an error has occured
+    if((cc=curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp_code))!=CURLE_OK || resp_code>=400){
+        AESM_DBG_ERROR("Response code error:%d", resp_code);
+        if(malloc_info.base){
+            free(malloc_info.base);
+        }
+        ae_ret = AE_FAILURE;
+        goto fini;
+    }
+
     *resp_msg = malloc_info.base;
     resp_size = malloc_info.size;
     AESM_DBG_TRACE("get response size=%d",resp_size);
-    return AE_SUCCESS;
+    ae_ret = AE_SUCCESS;
+fini:
+    if(headers!=NULL){
+        curl_slist_free_all(headers);
+    }
+    return ae_ret;
 }
 
 static void http_network_fini(CURL *curl)

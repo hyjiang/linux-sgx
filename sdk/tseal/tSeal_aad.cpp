@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -34,6 +34,7 @@
 #include "sgx_utils.h"
 #include "sgx_trts.h"
 #include "tSeal_internal.h"
+#include "tseal_migration_attr.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -45,7 +46,7 @@ extern "C" sgx_status_t sgx_mac_aadata(const uint32_t additional_MACtext_length,
 {
     sgx_status_t err = SGX_ERROR_UNEXPECTED;
     sgx_attributes_t attribute_mask;
-    attribute_mask.flags = SGX_FLAGS_RESERVED | SGX_FLAGS_INITTED | SGX_FLAGS_DEBUG;
+    attribute_mask.flags = TSEAL_DEFAULT_FLAGSMASK;
     attribute_mask.xfrm = 0x0;
 
     err = sgx_mac_aadata_ex(SGX_KEYPOLICY_MRSIGNER, attribute_mask, TSEAL_DEFAULT_MISCMASK, additional_MACtext_length,
@@ -195,16 +196,19 @@ extern "C" sgx_status_t sgx_unmac_aadata(const sgx_sealed_data_t *p_sealed_data,
     {
         return SGX_ERROR_INVALID_PARAMETER;
     }
-
-    // Ensure AAD does not cross enclave boundary
-    if (!(sgx_is_within_enclave(p_additional_MACtext, add_text_length) || 
-        sgx_is_outside_enclave(p_additional_MACtext, add_text_length)))
+    if(!(sgx_is_within_enclave(p_additional_MACtext_length, sizeof(*p_additional_MACtext_length)) ||
+        sgx_is_outside_enclave(p_additional_MACtext_length, sizeof(*p_additional_MACtext_length))))
     {
         return SGX_ERROR_INVALID_PARAMETER;
     }
-
     uint32_t additional_MACtext_length = *p_additional_MACtext_length;
     if (additional_MACtext_length < add_text_length) {
+        return SGX_ERROR_INVALID_PARAMETER;
+    }
+    // Ensure AAD does not cross enclave boundary
+    if (!(sgx_is_within_enclave(p_additional_MACtext, additional_MACtext_length) ||
+        sgx_is_outside_enclave(p_additional_MACtext, additional_MACtext_length)))
+    {
         return SGX_ERROR_INVALID_PARAMETER;
     }
 

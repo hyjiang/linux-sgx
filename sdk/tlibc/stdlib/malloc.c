@@ -423,10 +423,9 @@ NO_MALLINFO                default: 0
   of dealing with mismatches between system declarations and
   those in this file.
 
-MALLINFO_FIELD_TYPE        default: size_t
-  The type of the fields in the mallinfo struct. This was originally
-  defined as "int" in SVID etc, but is more usefully defined as
-  size_t. The value is used only if  HAVE_USR_INCLUDE_MALLOC_H is not set
+MALLINFO_FIELD_TYPE        default: int
+  The type of the fields in the mallinfo struct. The value is used
+  only if  HAVE_USR_INCLUDE_MALLOC_H is not set
 
 NO_MALLOC_STATS            default: 0
   If defined, don't compile "malloc_stats". This avoids calls to
@@ -733,7 +732,7 @@ typedef int LONG;
 #define NO_MALLINFO 0
 #endif  /* NO_MALLINFO */
 #ifndef MALLINFO_FIELD_TYPE
-#define MALLINFO_FIELD_TYPE size_t
+#define MALLINFO_FIELD_TYPE int
 #endif  /* MALLINFO_FIELD_TYPE */
 #ifndef NO_MALLOC_STATS
 #define NO_MALLOC_STATS 0
@@ -838,14 +837,14 @@ extern "C" {
 #if !ONLY_MSPACES
 
 /* ------------------- Declarations of public routines ------------------- */
-
 #ifndef USE_DL_PREFIX
-#define dlcalloc               calloc
-#define dlfree                 free
-#define dlmalloc               malloc
-#define dlmemalign             memalign
-#define dlrealloc              realloc
-#define dlmallinfo             mallinfo
+  #define ALIAS(tc_fn)   __attribute__ ((alias (#tc_fn), used))
+  void* __attribute__((weak)) malloc(size_t size)               ALIAS(dlmalloc);
+  void __attribute__((weak)) free(void* ptr)                     ALIAS(dlfree);
+  void* __attribute__((weak)) realloc(void* ptr, size_t size)    ALIAS(dlrealloc);
+  void* __attribute__((weak)) calloc(size_t n, size_t size)      ALIAS(dlcalloc);
+  void* __attribute__((weak)) memalign(size_t align, size_t s)  ALIAS(dlmemalign); 
+  struct mallinfo __attribute__((weak)) mallinfo(void)         ALIAS(dlmallinfo);
 #ifdef USE_MALLOC_DEPRECATED
 #define dlposix_memalign       posix_memalign
 #define dlrealloc_in_place     realloc_in_place

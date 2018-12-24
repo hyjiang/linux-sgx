@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -74,6 +74,90 @@ bool verify_cmac128(
     return false;
 }
 
+
+#ifdef SUPPLIED_KEY_DERIVATION
+
+#pragma message ("Supplied key derivation function is used.")
+
+typedef struct _hash_buffer_t
+{
+    uint8_t counter[4];
+    sample_ec_dh_shared_t shared_secret;
+    uint8_t algorithm_id[4];
+} hash_buffer_t;
+
+const char ID_U[] = "SGXRAENCLAVE";
+const char ID_V[] = "SGXRASERVER";
+
+// Derive two keys from shared key and key id.
+bool derive_key(
+    const sample_ec_dh_shared_t *p_shared_key,
+    uint8_t key_id,
+    sample_ec_key_128bit_t *first_derived_key,
+    sample_ec_key_128bit_t *second_derived_key)
+{
+    sample_status_t sample_ret = SAMPLE_SUCCESS;
+    hash_buffer_t hash_buffer;
+    sample_sha_state_handle_t sha_context;
+    sample_sha256_hash_t key_material;
+    
+    memset(&hash_buffer, 0, sizeof(hash_buffer_t));
+
+    /* counter in big endian  */
+    hash_buffer.counter[3] = key_id;
+
+    /*convert from little endian to big endian */
+    for (size_t i = 0; i < sizeof(sample_ec_dh_shared_t) ; i++)
+    {
+        hash_buffer.shared_secret.s[i] = p_shared_key->s[sizeof(p_shared_key->s) - 1 - i];
+    }
+
+    sample_ret = sample_sha256_init(&sha_context);
+    if (sample_ret != SAMPLE_SUCCESS)
+    {
+        return false;
+    }
+    sample_ret = sample_sha256_update((uint8_t*)&hash_buffer, sizeof(hash_buffer_t), sha_context);
+    if (sample_ret != SAMPLE_SUCCESS)
+    {
+        sample_sha256_close(sha_context);
+        return false;
+    }
+    sample_ret = sample_sha256_update((uint8_t*)ID_U, sizeof(ID_U), sha_context);
+    if (sample_ret != SAMPLE_SUCCESS)
+    {
+        sample_sha256_close(sha_context);
+        return false;
+    }
+    sample_ret = sample_sha256_update((uint8_t*)ID_V, sizeof(ID_V), sha_context);
+    if (sample_ret != SAMPLE_SUCCESS)
+    {
+        sample_sha256_close(sha_context);
+        return false;
+    }
+    sample_ret = sample_sha256_get_hash(sha_context, &key_material);
+    if (sample_ret != SAMPLE_SUCCESS)
+    {
+        sample_sha256_close(sha_context);
+        return false;
+    }
+    sample_ret = sample_sha256_close(sha_context);
+
+    static_assert(sizeof(sample_ec_key_128bit_t)* 2 == sizeof(sample_sha256_hash_t), "structure size mismatch.");
+    memcpy_s(first_derived_key, sizeof(sample_ec_key_128bit_t), &key_material, sizeof(sample_ec_key_128bit_t));
+    memcpy_s(second_derived_key, sizeof(sample_ec_key_128bit_t), (uint8_t*)&key_material + sizeof(sample_ec_key_128bit_t), sizeof(sample_ec_key_128bit_t));
+
+    // memset here can be optimized away by compiler, so please use memset_s on
+    // windows for production code and similar functions on other OSes.
+    memset(&key_material, 0, sizeof(sample_sha256_hash_t));
+
+    return true;
+}
+
+#else
+
+#pragma message ("Default key derivation function is used.")
+
 #define EC_DERIVATION_BUFFER_SIZE(label_length) ((label_length) +4)
 
 const char str_SMK[] = "SMK";
@@ -95,8 +179,8 @@ bool derive_key(
     memset(&cmac_key, 0, MAC_KEY_SIZE);
 
     sample_ret = sample_rijndael128_cmac_msg(
-        (sample_cmac_128bit_key_t *)&cmac_key,
-        (uint8_t*)p_shared_key,
+        (const sample_cmac_128bit_key_t *)&cmac_key,
+        (const uint8_t*)p_shared_key,
         sizeof(sample_ec_dh_shared_t),
         (sample_cmac_128bit_tag_t *)&key_derive_key);
     if (sample_ret != SAMPLE_SUCCESS)
@@ -149,7 +233,7 @@ bool derive_key(
     /*counter = 0x01 */
     p_derivation_buffer[0] = 0x01;
     /*label*/
-    memcpy(&p_derivation_buffer[1], label, label_length);
+    memcpy_s(&p_derivation_buffer[1], derivation_buffer_length - 1, label, label_length);
     /*output_key_len=0x0080*/
     uint16_t *key_len = (uint16_t *)(&(p_derivation_buffer[derivation_buffer_length - 2]));
     *key_len = 0x0080;
@@ -170,3 +254,4 @@ bool derive_key(
     }
     return true;
 }
+#endif

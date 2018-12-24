@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+# Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -34,19 +34,27 @@ include scripts/installConfig
 SOURCE_FOLDER=package
 SCRIPTS_FOLDER=scripts
 
-INSTALL_PATH=$(DESTDIR)/$(SGX_PACKAGES_PATH)/$(PSW_PKG_NAME)
+INSTALL_PATH=$(shell readlink -m $(DESTDIR)/$(SGX_PACKAGES_PATH)/$(PSW_PKG_NAME))
 SOURCE_INSTALL_PATH=$(INSTALL_PATH)
 SCRIPTS_INSTALL_PATH=$(INSTALL_PATH)/$(SCRIPTS_FOLDER)
 PSW_LIB_PATH=$(SOURCE_INSTALL_PATH)/$(LIB_DIR)
+USR_LIB_PATH=$(addprefix $(DESTDIR)/usr/, $(notdir $(shell gcc -print-multi-os-directory)))
+
+ECL_VER=1.0.0
 
 default:
 
 install:
 	install -d $(SOURCE_INSTALL_PATH)
 	install -d $(SCRIPTS_INSTALL_PATH)
-	install -d $(DESTDIR)/usr/lib
+	install -d $(USR_LIB_PATH)
 	cp -r $(SOURCE_FOLDER)/* $(SOURCE_INSTALL_PATH)
 	install $(SCRIPTS_FOLDER)/* $(SCRIPTS_INSTALL_PATH)
-	mv $(PSW_LIB_PATH)/libsgx_uae_service.so $(DESTDIR)/usr/lib
-	mv $(PSW_LIB_PATH)/libsgx_urts.so $(DESTDIR)/usr/lib
+	mv $(PSW_LIB_PATH)/libsgx_uae_service.so $(USR_LIB_PATH)
+	mv $(PSW_LIB_PATH)/libsgx_urts.so $(USR_LIB_PATH)
+	mv $(PSW_LIB_PATH)/libsgx_enclave_common.so $(USR_LIB_PATH)
 	rmdir $(PSW_LIB_PATH)
+	cd $(USR_LIB_PATH) && \
+	mv libsgx_enclave_common.so libsgx_enclave_common.so.$(ECL_VER) && \
+	ln -fs libsgx_enclave_common.so.$(ECL_VER) libsgx_enclave_common.so.$(shell echo $(ECL_VER) |awk -F. '{print $$1}') && \
+	ln -fs libsgx_enclave_common.so.$(shell echo $(ECL_VER) |awk -F. '{print $$1}') libsgx_enclave_common.so

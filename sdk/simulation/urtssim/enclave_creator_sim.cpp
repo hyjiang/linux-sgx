@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -45,6 +45,33 @@
 #include <assert.h>
 #include <time.h>
 
+#include <openssl/evp.h>
+#include <openssl/err.h>
+#include <openssl/crypto.h>
+
+__attribute__((constructor))
+static void init_openssl(void)
+{
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+    OpenSSL_add_all_algorithms();
+    ERR_load_crypto_strings();
+#else
+    OPENSSL_init_crypto(0, NULL);
+#endif
+}
+
+__attribute__((destructor))
+static void cleanup_openssl(void)
+{
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+    EVP_cleanup();
+    CRYPTO_cleanup_all_ex_data();
+    ERR_remove_thread_state(NULL);
+    ERR_free_strings();
+#endif
+}
+
+
 EnclaveCreator* g_enclave_creator = new EnclaveCreatorSim();
 
 int EnclaveCreatorSim::create_enclave(secs_t *secs, sgx_enclave_id_t *enclave_id, void **start_addr, bool ae)
@@ -69,7 +96,11 @@ int EnclaveCreatorSim::init_enclave(sgx_enclave_id_t enclave_id, enclave_css_t *
     sgx_launch_token_t token;
     memset(token, 0, sizeof(sgx_launch_token_t));
 
-    int ret = lc->get_launch_token(&token);
+    int ret = lc->update_launch_token(false);
+    if(ret != SGX_SUCCESS)
+        return ret;
+
+    ret = lc->get_launch_token(&token);
     if(ret != SGX_SUCCESS)
         return ret;
 
@@ -78,6 +109,7 @@ int EnclaveCreatorSim::init_enclave(sgx_enclave_id_t enclave_id, enclave_css_t *
 
 int EnclaveCreatorSim::get_misc_attr(sgx_misc_attribute_t *sgx_misc_attr, metadata_t *metadata, SGXLaunchToken * const lc, uint32_t debug_flag)
 {
+    UNUSED(lc);
     sgx_attributes_t *required_attr;
     enclave_css_t *enclave_css;
     sgx_attributes_t *secs_attr;
@@ -137,38 +169,13 @@ int EnclaveCreatorSim::get_misc_attr(sgx_misc_attribute_t *sgx_misc_attr, metada
         SE_TRACE(SE_TRACE_WARNING, "secs attributes.flag does NOT match signature attributes.flag\n");
         return SGX_ERROR_INVALID_ATTRIBUTE;
     }
-    
-    if(lc != NULL)
-    {
-        sgx_launch_token_t token;
-        memset(&token, 0, sizeof(token));
-        if(lc->get_launch_token(&token) != SGX_SUCCESS)
-            return SGX_ERROR_UNEXPECTED;
-        token_t *launch = (token_t *)token;
 
-        if( 1 == launch->body.valid)
-        {
-            // Debug launch enclave cannot launch production enclave
-            if( !(secs_attr->flags & SGX_FLAGS_DEBUG)
-                && (launch->attributes_le.flags & SGX_FLAGS_DEBUG) )
-            {
-                SE_TRACE(SE_TRACE_WARNING, "secs attributes is non-debug, \n");
-                return SE_ERROR_INVALID_LAUNCH_TOKEN;
-            }
-
-            // Verify attributes in lictoken are the same as the enclave
-            if(memcmp(&launch->body.attributes, secs_attr, sizeof(sgx_attributes_t)))
-            {
-                SE_TRACE(SE_TRACE_WARNING, "secs attributes does NOT match launch token attributes\n");
-                return SGX_ERROR_INVALID_ATTRIBUTE;
-            }
-        }
-    }
     return SGX_SUCCESS;
 }
 
-int EnclaveCreatorSim::destroy_enclave(sgx_enclave_id_t enclave_id)
+int EnclaveCreatorSim::destroy_enclave(sgx_enclave_id_t enclave_id, uint64_t enclave_size)
 {
+    UNUSED(enclave_size);
     CEnclave *enclave = CEnclavePool::instance()->get_enclave(enclave_id);
 
     if(enclave == NULL)
@@ -201,8 +208,9 @@ int EnclaveCreatorSim::initialize(sgx_enclave_id_t enclave_id)
     assert(global_data_sim_ptr != NULL);
 
     // Initialize the `seed' to `g_global_data_sim'.
-    global_data_sim_ptr->seed = (uint32_t)time(NULL);
-
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    global_data_sim_ptr->seed = (uint64_t)ts.tv_sec * 1000000000ULL  + (uint64_t)ts.tv_nsec; 
     global_data_sim_ptr->secs_ptr = ce->get_secs();
     sgx_cpu_svn_t temp_cpusvn = {{0}};
 
@@ -213,10 +221,11 @@ int EnclaveCreatorSim::initialize(sgx_enclave_id_t enclave_id)
 
 
     //Since CPUID instruction is NOT supported within enclave, we emuerate the cpu features here and send to tRTS.
-    cpu_sdk_info_t info;
+    system_features_t info;
     info.cpu_features = 0;
-    get_cpu_features(&info.cpu_features);
+    get_cpu_features(&info.cpu_features, (unsigned int*)info.cpuinfo_table);
     info.version = SDK_VERSION_1_5;
+    info.sealed_key = enclave->get_sealed_key();
     status = enclave->ecall(ECMD_INIT_ENCLAVE, NULL, reinterpret_cast<void *>(&info));
     //free the tcs used by initialization;
     enclave->get_thread_pool()->reset();
@@ -236,8 +245,64 @@ bool EnclaveCreatorSim::use_se_hw() const
     return false;
 }
 
-bool EnclaveCreatorSim::get_plat_cap(sgx_misc_attribute_t *se_attr) 
+bool EnclaveCreatorSim::is_EDMM_supported(sgx_enclave_id_t enclave_id)
+{
+    UNUSED(enclave_id);
+    return false;
+}
+
+bool EnclaveCreatorSim::is_driver_compatible()
+{
+    return true;
+}
+
+bool EnclaveCreatorSim::is_in_kernel_driver()
+{
+    return false;
+}
+
+bool EnclaveCreatorSim::get_plat_cap(sgx_misc_attribute_t *se_attr)
 {
     UNUSED(se_attr);
     return false;
+}
+
+int EnclaveCreatorSim::emodpr(uint64_t addr, uint64_t size, uint64_t flag)
+{
+    UNUSED(addr);
+    UNUSED(size);
+    UNUSED(flag);
+
+    return SGX_SUCCESS;
+}
+
+int EnclaveCreatorSim::mktcs(uint64_t tcs_addr)
+{
+    UNUSED(tcs_addr);
+
+    return SGX_SUCCESS;
+}
+
+int EnclaveCreatorSim::trim_range(uint64_t fromaddr, uint64_t toaddr)
+{
+    UNUSED(fromaddr);
+    UNUSED(toaddr);
+
+    return SGX_SUCCESS;
+
+}
+
+int EnclaveCreatorSim::trim_accept(uint64_t addr)
+{
+    UNUSED(addr);
+
+    return SGX_SUCCESS;
+}
+
+int EnclaveCreatorSim::remove_range(uint64_t fromaddr, uint64_t numpages)
+{
+    UNUSED(fromaddr);
+    UNUSED(numpages);
+
+    return SGX_SUCCESS;
 }

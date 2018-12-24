@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -75,6 +75,9 @@ typedef enum _tlv_enum_type_t{
     TLV_SIGNATURE,
     /* End-point Selection Protocol TLVs*/
     TLV_PEK,
+    TLV_PLATFORM_INFO,
+    TLV_PWK2,
+    TLV_SE_REPORT
 }tlv_enum_type_t;
 
 /*here comes general type and macro definition for AESM related Server URL which will be shared by code in other components*/
@@ -83,7 +86,8 @@ typedef enum _aesm_network_server_enum_type_t{
     PSE_PROVISIONING,
     ENDPOINT_SELECTION,
 	REVOCATION_LIST_RETRIEVAL,
-    PSE_OCSP
+    PSE_OCSP,
+    SGX_WHITE_LIST_FILE
 }aesm_network_server_enum_type_t;
 
 typedef enum _pve_msg_type_t
@@ -136,7 +140,13 @@ enum _se_protocol_response_status_t
     SE_PRS_OK,
     SE_PRS_PLATFORM_REVOKED, 
     SE_PRS_STATUS_INTEGRITY_FAILED,
-    SE_PRS_PERFORMANCE_REKEY_NOT_SUPPORTED
+    SE_PRS_PERFORMANCE_REKEY_NOT_SUPPORTED,
+    SE_PRS_PROVISIONING_ERROR,
+    SE_PRS_INVALID_REQUEST,
+    SE_PRS_PROV_ATTEST_KEY_NOT_FOUND,   
+    SE_PRS_INVALID_REPORT,
+    SE_PRS_PROV_ATTEST_KEY_REVOKED,
+    SE_PRS_PROV_ATTEST_KEY_TCB_OUT_OF_DATE
 };
 
 typedef uint16_t pse_protocol_response_status_t;
@@ -182,6 +192,7 @@ typedef struct _provision_response_header_t{
 #define GET_TYPE_FROM_PROVISION_RESPONSE(resp)  (((const provision_response_header_t *)(resp))->type)
 
 #define TLV_VERSION_1   1
+#define TLV_VERSION_2   2
 
 #endif
 

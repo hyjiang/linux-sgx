@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+# Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -29,6 +29,7 @@
 #
 #
 
+
 # -----------------------------------------------------------------------------
 # Function : parent-dir
 # Arguments: 1: path
@@ -54,6 +55,11 @@ LINUX_UNITTESTS       := $(ROOT_DIR)/unittests
 
 CP    := /bin/cp -f
 MKDIR := mkdir -p
+STRIP := strip
+OBJCOPY := objcopy
+NIPX := .nipx
+NIPD := .nipd
+NIPRODT := .niprod
 
 # clean the content of 'INCLUDE' - this variable will be set by vcvars32.bat
 # thus it will cause build error when this variable is used by our Makefile,
@@ -64,18 +70,33 @@ INCLUDE :=
 CUR_DIR := $(realpath $(call parent-dir,$(lastword $(wordlist 2,$(words $(MAKEFILE_LIST)),x $(MAKEFILE_LIST)))))
 
 # turn on stack protector for SDK
-COMMON_FLAGS += -fstack-protector
+CC_BELOW_4_9 := $(shell expr "`$(CC) -dumpversion`" \< "4.9")
+ifeq ($(CC_BELOW_4_9), 1)
+    COMMON_FLAGS += -fstack-protector
+else
+    COMMON_FLAGS += -fstack-protector-strong
+endif
 
 ifdef DEBUG
-    COMMON_FLAGS += -ggdb -DDEBUG -UNDEBUG
+    COMMON_FLAGS += -O0 -ggdb -DDEBUG -UNDEBUG
     COMMON_FLAGS += -DSE_DEBUG_LEVEL=SE_TRACE_DEBUG
 else
-    COMMON_FLAGS += -O2   -UDEBUG -DNDEBUG
+    COMMON_FLAGS += -O2 -D_FORTIFY_SOURCE=2 -UDEBUG -DNDEBUG
 endif
 
 ifdef SE_SIM
     COMMON_FLAGS += -DSE_SIM
 endif
+
+# Disable ref-LE build by default.
+# Users could enable the ref-LE build 
+# by explicitly specifying 'BUILD_REF_LE=1'
+BUILD_REF_LE ?= 0
+ifeq ($(BUILD_REF_LE), 1)
+    COMMON_FLAGS += -DREF_LE
+endif
+
+COMMON_FLAGS += -ffunction-sections -fdata-sections
 
 # turn on compiler warnings as much as possible
 COMMON_FLAGS += -Wall -Wextra -Winit-self -Wpointer-arith -Wreturn-type \
@@ -89,8 +110,7 @@ CFLAGS += -Wjump-misses-init -Wstrict-prototypes -Wunsuffixed-float-constants
 # additional warnings flags for C++
 CXXFLAGS += -Wnon-virtual-dtor
 
-# for static_assert()
-CXXFLAGS += -std=c++0x
+CXXFLAGS += -std=c++11
 
 .DEFAULT_GOAL := all
 # this turns off the RCS / SCCS implicit rules of GNU Make
@@ -138,6 +158,9 @@ endif
 CFLAGS   += $(COMMON_FLAGS)
 CXXFLAGS += $(COMMON_FLAGS)
 
+# Enable the security flags
+COMMON_LDFLAGS := -Wl,-z,relro,-z,now,-z,noexecstack
+
 # Compiler and linker options for an Enclave
 #
 # We are using '--export-dynamic' so that `g_global_data_sim' etc.
@@ -148,6 +171,25 @@ CXXFLAGS += $(COMMON_FLAGS)
 # as `global' in the LD version script.
 ENCLAVE_CFLAGS   = -ffreestanding -nostdinc -fvisibility=hidden -fpie
 ENCLAVE_CXXFLAGS = $(ENCLAVE_CFLAGS) -nostdinc++
-ENCLAVE_LDFLAGS  = -Wl,-Bstatic -Wl,-Bsymbolic -Wl,--no-undefined \
+ENCLAVE_LDFLAGS  = $(COMMON_LDFLAGS) -Wl,-Bstatic -Wl,-Bsymbolic -Wl,--no-undefined \
                    -Wl,-pie,-eenclave_entry -Wl,--export-dynamic  \
                    -Wl,--defsym,__ImageBase=0
+
+
+# Choose to use the optimized libraries (IPP/String/Math) by default.
+# Users could also use the source code version (SGXSSL/String/Math) by
+# explicitly specifying 'USE_OPT_LIBS=0'
+USE_OPT_LIBS ?= 1
+
+
+ifeq ($(ARCH), x86_64)
+IPP_SUBDIR = intel64
+else
+IPP_SUBDIR = ia32
+endif
+
+SGX_IPP_DIR     := $(ROOT_DIR)/external/ippcp_internal
+SGX_IPP_INC     := $(SGX_IPP_DIR)/inc
+IPP_LIBS_DIR    := $(SGX_IPP_DIR)/lib/linux/$(IPP_SUBDIR)
+LD_IPP          := -lippcp
+

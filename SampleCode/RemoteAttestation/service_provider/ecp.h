@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -38,10 +38,10 @@
 #include "remote_attestation_result.h"
 
 #ifndef SAMPLE_FEBITSIZE
-#define SAMPLE_FEBITSIZE     256
+    #define SAMPLE_FEBITSIZE                    256
 #endif
 
-#define SAMPLE_ECP_KEY_SIZE  (SAMPLE_FEBITSIZE/8)
+#define SAMPLE_ECP_KEY_SIZE                     (SAMPLE_FEBITSIZE/8)
 
 typedef struct sample_ec_priv_t
 {
@@ -70,6 +70,22 @@ errno_t memcpy_s(void *dest, size_t numberOfElements, const void *src,
                  size_t count);
 
 
+#ifdef SUPPLIED_KEY_DERIVATION
+
+typedef enum _sample_derive_key_type_t
+{
+    SAMPLE_DERIVE_KEY_SMK_SK = 0,
+    SAMPLE_DERIVE_KEY_MK_VK,
+} sample_derive_key_type_t;
+
+bool derive_key(
+    const sample_ec_dh_shared_t *p_shared_key,
+    uint8_t key_id,
+    sample_ec_key_128bit_t *first_derived_key,
+    sample_ec_key_128bit_t *second_derived_key);
+
+#else
+
 typedef enum _sample_derive_key_type_t
 {
     SAMPLE_DERIVE_KEY_SMK = 0,
@@ -82,6 +98,8 @@ bool derive_key(
     const sample_ec_dh_shared_t *p_shared_key,
     uint8_t key_id,
     sample_ec_key_128bit_t *derived_key);
+
+#endif
 
 bool verify_cmac128(
     sample_ec_key_128bit_t mac_key,

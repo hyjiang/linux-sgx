@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -45,8 +45,8 @@
 class QEAESMLogic{
 public:
     static aesm_error_t init_quote(sgx_target_info_t *target_info,
-        uint8_t *gid, uint32_t gid_size, uint16_t qe_isv_svn,
-        const sgx_cpu_svn_t qe_cpu_svn);
+        uint8_t *gid, uint32_t gid_size, uint16_t pce_isv_svn,
+        uint16_t qe_isv_svn, const sgx_cpu_svn_t qe_cpu_svn);
 
     static aesm_error_t get_quote(const uint8_t *report,
         uint32_t quote_type,
@@ -54,7 +54,7 @@ public:
         const uint8_t *nonce,
         const uint8_t *sigrl, uint32_t sigrl_size,
         uint8_t *qe_report,
-        uint8_t *quote, uint32_t buf_size);
+        uint8_t *quote, uint32_t buf_size, uint16_t pce_isv_svn);
 };
 #endif
 

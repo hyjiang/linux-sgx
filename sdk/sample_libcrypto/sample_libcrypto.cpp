@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -31,10 +31,13 @@
 
 
 /*
- * This sample cryptopgraphy library was intended to be used in a limited 
- * manner. Its cryptographic strength is very weak. It should not be 
- * used by any production code. Its scope is limited to assist in the
- * development of the remote attestation sample application.
+* Do NOT use this library in your actual product.
+* The purpose of this sample library is to aid the debugging of a
+* remote attestation service.
+* To achieve that goal, the sample remote attestation application
+* will use this sample library to generate reproducible messages.
+* If you have still not decided on whether you should use this library in a
+* released product, please refer to the implementation of __do_get_rand32.
 **/
 
 #include <string.h>
@@ -105,12 +108,12 @@ extern "C" int memset_s(void *s, size_t smax, int c, size_t n)
 #endif
 
 
-// We are using this very non-random definition for reproducibility / debugging purposes.
+
 static uint32_t seed = (uint32_t)(9);
 
+// We are using this very non-random definition for reproducibility / debugging purposes.
 static inline sample_status_t  __do_get_rand32(uint32_t* rand_num)
 {
-    // A better source of entropy would be the "time" function or something like that
     *rand_num = seed;
     return SAMPLE_SUCCESS;
 }
@@ -144,7 +147,7 @@ sample_status_t sample_read_rand(unsigned char *rand, size_t length_in_bytes)
             ? length_in_bytes : sizeof(rand_num);
         if(memcpy_s(rand, size, &rand_num, size))
         {
-            return status;
+            return SAMPLE_ERROR_UNEXPECTED;
         }
 
         rand += size;
@@ -225,7 +228,7 @@ static void sample_ipp_secure_free_BN(IppsBigNumState *pBN, int size_in_bytes)
     return;
 }
 
-IppStatus __STDCALL sample_ipp_DRNGen(Ipp32u* pRandBNU, int nBits, void* pCtx_unused)
+IppStatus IPP_STDCALL sample_ipp_DRNGen(Ipp32u* pRandBNU, int nBits, void* pCtx_unused)
 {
     sample_status_t sample_ret;
     UNUSED(pCtx_unused);

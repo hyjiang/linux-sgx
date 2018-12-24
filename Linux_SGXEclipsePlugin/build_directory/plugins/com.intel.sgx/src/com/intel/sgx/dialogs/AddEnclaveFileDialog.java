@@ -1,5 +1,5 @@
 ///////////////////////////////////////////////////////////////////////////
-// Copyright (c) 2016 Intel Corporation.				 //
+// Copyright (c) 2018 Intel Corporation.				 //
 // 									 //
 // All rights reserved. This program and the accompanying materials	 //
 // are made available under the terms of the Eclipse Public License v1.0 //
@@ -95,7 +95,7 @@ public class AddEnclaveFileDialog extends SGXDialogBase {
 	@Override
 	protected void configureShell(Shell newShell) {
 		super.configureShell(newShell);
-		newShell.setText("Add New SGX Enclave Dialog");
+		newShell.setText("Add New Intel(R) SGX Enclave Dialog");
 		newShell.layout();
 	}
 	

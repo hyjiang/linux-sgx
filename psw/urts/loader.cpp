@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -45,6 +45,7 @@
 #include "binparser.h"
 #include <assert.h>
 #include <vector>
+#include <tuple>
 #include <algorithm>
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
@@ -83,7 +84,7 @@ const void* CLoader::get_start_addr() const
     return m_start_addr;
 }
 
-const std::vector<tcs_t *>& CLoader::get_tcs_list() const
+const std::vector<std::pair<tcs_t *, bool>>& CLoader::get_tcs_list() const
 {
     return m_tcs_list;
 }
@@ -101,76 +102,78 @@ void* CLoader::get_symbol_address(const char * const symbol)
     return GET_PTR(void, m_start_addr, rva);
 }
 
-int CLoader::build_mem_region(const section_info_t * const sec_info)
+// is_relocation_page returns true if the specified RVA is a writable relocation page based on the bitmap.
+bool CLoader::is_relocation_page(const uint64_t rva, std::vector<uint8_t> *bitmap)
+{
+    uint64_t page_frame = rva >> SE_PAGE_SHIFT;
+    //NOTE:
+    //  Current enclave size is not beyond 128G, so the type-casting from (uint64>>15) to (size_t) is OK.
+    //  In the future, if the max enclave size is extended to beyond (1<<49), this type-casting will not work.
+    //  It only impacts the enclave signing process. (32bit signing tool to sign 64 bit enclaves)
+    size_t index = (size_t)(page_frame / 8);
+    if(bitmap && (index < bitmap->size()))
+    {
+        return ((*bitmap)[index] & (1 << (page_frame % 8)));
+    }
+    return false;
+}
+
+int CLoader::build_mem_region(const section_info_t &sec_info)
 {
     int ret = SGX_SUCCESS;
-    uint8_t added_page[SE_PAGE_SIZE];
     uint64_t offset = 0;
-    uint8_t *raw_ptr = NULL;
-    uint64_t rva = 0;
     sec_info_t sinfo;
     memset(&sinfo, 0, sizeof(sinfo));
 
-    rva = sec_info->rva + offset;
-    while(offset < TRIM_TO_PAGE(sec_info->raw_data_size))
+    // Build pages of the section that are contain initialized data.  Each page
+    // needs to be added individually as the page may hold relocation data, in
+    // which case the page needs to be marked writable.
+    while(offset < sec_info.raw_data_size)
     {
-        raw_ptr = sec_info->raw_data + offset;
-        sinfo.flags = sec_info->flag;
+        uint64_t rva = sec_info.rva + offset;
+        uint64_t size = MIN((SE_PAGE_SIZE - PAGE_OFFSET(rva)), (sec_info.raw_data_size - offset));
+        sinfo.flags = sec_info.flag;
 
-        //check if the page is writable.
-        if(sec_info->bitmap && sec_info->bitmap->size())
+        if(is_relocation_page(rva, sec_info.bitmap) && !(sec_info.flag & SI_FLAG_W))
         {
-            uint64_t page_frame = rva >> SE_PAGE_SHIFT;
+            sinfo.flags = sec_info.flag | SI_FLAG_W;
+            assert(g_enclave_creator != NULL);
+            if(g_enclave_creator->use_se_hw() == true)
+            {
+                ret = mprotect((void*)(TRIM_TO_PAGE(rva) + (uint64_t)m_start_addr), SE_PAGE_SIZE, 
+                               (int)(sinfo.flags & SI_MASK_MEM_ATTRIBUTE));
+                if(ret != 0)
+                {
+                    SE_TRACE(SE_TRACE_WARNING, "mprotect(rva=0x%llx, len=%d, flags=%d) failed\n",
+                             rva, SE_PAGE_SIZE, int(sinfo.flags & SI_MASK_MEM_ATTRIBUTE));
+                    return SGX_ERROR_UNEXPECTED;
+                }
+            }
+        }
 
-            //NOTE:
-            //  Current enclave size is not beyond 64G, so the type-casting from (uint64>>15) to (size_t) is OK.
-            //  In the future, if the max enclave size is extended to beyond (1<<49), this type-casting will not work.
-            //  It only impacts the enclave signing process. (32bit signing tool to sign 64 bit enclaves)
-            if((*sec_info->bitmap)[(size_t)(page_frame / 8)] & (1 << (page_frame % 8)))
-                sinfo.flags = sec_info->flag | SI_FLAG_W;
-        }
-        //call driver API to add page; raw_ptr needn't be page align, driver will handle page align;
-        if(SGX_SUCCESS != (ret = get_enclave_creator()->add_enclave_page(ENCLAVE_ID_IOCTL, raw_ptr, rva, sinfo, ADD_EXTEND_PAGE)))
-        {
-            //if add page failed , we should remove enclave somewhere;
+        if (size == SE_PAGE_SIZE)
+            ret = build_pages(rva, size, sec_info.raw_data + offset, sinfo, ADD_EXTEND_PAGE);
+        else
+            ret = build_partial_page(rva, size, sec_info.raw_data + offset, sinfo, ADD_EXTEND_PAGE);
+        if(SGX_SUCCESS != ret)
             return ret;
-        }
-        offset += SE_PAGE_SIZE;
-        rva = sec_info->rva + offset;
+
+        // only the first time that rva may be not page aligned
+        offset += SE_PAGE_SIZE - PAGE_OFFSET(rva);
     }
-    //add the remaider of last page of raw data
-    if(!IS_PAGE_ALIGNED(sec_info->raw_data_size))
+    
+    // Add any remaining uninitialized data.  We can call build_pages directly
+    // even if there are partial pages since the source is null, i.e. everything
+    // is filled with '0'.  Uninitialied data cannot be a relocation table, ergo
+    // there is no need to check the relocation bitmap.
+    if(sec_info.virtual_size > offset)
     {
-        sinfo.flags = sec_info->flag;
-        //the padding be 0
-        memset(added_page, 0, SE_PAGE_SIZE);
-        raw_ptr = sec_info->raw_data + offset;
-        rva = sec_info->rva + offset;
-        memcpy_s(added_page, SE_PAGE_SIZE, raw_ptr, sec_info->raw_data_size & (SE_PAGE_SIZE-1));
-        //check if the page is writable.
-        if(sec_info->bitmap && sec_info->bitmap->size())
-        {
-            uint64_t page_frame = rva >> SE_PAGE_SHIFT;
-            //NOTE:
-            //  Current enclave size is not beyond 64G, so the type-casting from (uint64>>15) to (size_t) is OK.
-            //  In the future, if the max enclave size is extended to beyond (1<<49), this type-casting will not work.
-            //  It only impacts the enclave signing process. (32bit signing tool to sign 64 bit enclaves)
-            if((*sec_info->bitmap)[(size_t)(page_frame / 8)] & (1 << (page_frame % 8)))
-                sinfo.flags = sec_info->flag | SI_FLAG_W;
-        }
-        //call driver to add page;
-        if(SGX_SUCCESS != (ret = get_enclave_creator()->add_enclave_page(ENCLAVE_ID_IOCTL, added_page, rva, sinfo, ADD_EXTEND_PAGE)))
-        {
-            //if add page failed , we should remove enclave somewhere;
-            return ret;
-        }
-        rva += SE_PAGE_SIZE;
-    }
-    //add unintialized page.If the section have no raw data, the offset should be 0.
-    if(ROUND_TO_PAGE(sec_info->virtual_size) > ROUND_TO_PAGE(sec_info->raw_data_size))
-    {
-        size_t size = (size_t)(ROUND_TO_PAGE(sec_info->virtual_size) - ROUND_TO_PAGE(sec_info->raw_data_size));
-        sinfo.flags = sec_info->flag;
+        uint64_t rva = sec_info.rva + offset;
+        size_t size = (size_t)(ROUND_TO_PAGE(sec_info.virtual_size - offset + PAGE_OFFSET(rva)));
+
+        rva = TRIM_TO_PAGE(rva);
+
+        sinfo.flags = sec_info.flag;
         if(SGX_SUCCESS != (ret = build_pages(rva, size, 0, sinfo, ADD_EXTEND_PAGE)))
             return ret;
     }
@@ -178,61 +181,93 @@ int CLoader::build_mem_region(const section_info_t * const sec_info)
     return SGX_SUCCESS;
 }
 
-int CLoader::build_sections(vector<uint8_t> *bitmap)
+int CLoader::build_sections(std::vector<uint8_t> *bitmap)
 {
     int ret = SGX_SUCCESS;
     std::vector<Section*> sections = m_parser.get_sections();
+    uint64_t max_rva =0;
+    Section* last_section = NULL;
 
     for(unsigned int i = 0; i < sections.size() ; i++)
     {
-        //since build_mem_region require the sec_info.rva be page aligned, we need handle the first page.
-        //build the first page;
-        uint64_t offset = (sections[i]->get_rva() & (SE_PAGE_SIZE -1));
-        uint64_t size = SE_PAGE_SIZE - offset;
-        uint8_t first_page[SE_PAGE_SIZE];
-        //the raw data may be smaller than the size, we get the min of them
-        if(sections[i]->raw_data_size() < size)
-            size = sections[i]->raw_data_size();
-        //the padding is '0'
-        memset(first_page, 0, SE_PAGE_SIZE);
-        memcpy_s(&first_page[offset], (size_t)size, sections[i]->raw_data(), (size_t)size);
-        section_info_t sec_info = { first_page, SE_PAGE_SIZE, sections[i]->get_rva() & (~(SE_PAGE_SIZE - 1)), SE_PAGE_SIZE, sections[i]->get_si_flags(), bitmap };
-
-        if(SGX_SUCCESS != (ret = build_mem_region(&sec_info)))
+        
+        
+        
+        if((META_DATA_MAKE_VERSION(SGX_1_5_MAJOR_VERSION,SGX_1_5_MINOR_VERSION ) == m_metadata->version) &&
+            (last_section != NULL) &&
+           (ROUND_TO_PAGE(last_section->virtual_size() + last_section->get_rva()) < ROUND_TO_PAGE(ROUND_TO_PAGE(last_section->virtual_size()) + last_section->get_rva())) &&
+           (ROUND_TO_PAGE(last_section->get_rva() + last_section->virtual_size()) < (sections[i]->get_rva() & (~(SE_PAGE_SIZE - 1)))))
         {
-            return ret;
-        }
-        //if there is more pages, then build the next paged aligned pages
-        if((sections[i]->virtual_size() + offset) >  SE_PAGE_SIZE)
-        {
-            sec_info.raw_data = GET_PTR(uint8_t, sections[i]->raw_data(), size);
-            sec_info.raw_data_size = sections[i]->raw_data_size() - size;
-            sec_info.rva = sections[i]->get_rva() + (SE_PAGE_SIZE - offset);
-            assert(0 == (sec_info.rva & (SE_PAGE_SIZE - 1)));
-            //we need use (SE_PAGE_SIZE - offset), because (SE_PAGE_SIZE - offset) may larger than size
-            sec_info.virtual_size = sections[i]->virtual_size() - (SE_PAGE_SIZE - offset);
-            sec_info.flag = sections[i]->get_si_flags();
-            sec_info.bitmap = bitmap;
-            if(SGX_SUCCESS != (ret = build_mem_region(&sec_info)))
-            {
+            size_t size = SE_PAGE_SIZE;
+            sec_info_t sinfo;
+            memset(&sinfo, 0, sizeof(sinfo));
+            sinfo.flags = last_section->get_si_flags();
+            uint64_t rva = ROUND_TO_PAGE(last_section->get_rva() + last_section->virtual_size());
+            if(SGX_SUCCESS != (ret = build_pages(rva, size, 0, sinfo, ADD_EXTEND_PAGE)))
                 return ret;
-            }
         }
+
+        if(sections[i]->get_rva() > max_rva) 
+        {
+            max_rva = sections[i]->get_rva();
+            last_section = sections[i];
+        }
+
+        section_info_t sec_info = { sections[i]->raw_data(), sections[i]->raw_data_size(), sections[i]->get_rva(), sections[i]->virtual_size(), sections[i]->get_si_flags(), bitmap };
+
+        if(SGX_SUCCESS != (ret = build_mem_region(sec_info)))
+            return ret;
+    }
+    
+    
+    
+    if((META_DATA_MAKE_VERSION(SGX_1_5_MAJOR_VERSION,SGX_1_5_MINOR_VERSION ) == m_metadata->version) &&
+        (last_section != NULL) &&
+       (ROUND_TO_PAGE(last_section->virtual_size() + last_section->get_rva()) < ROUND_TO_PAGE(ROUND_TO_PAGE(last_section->virtual_size()) + last_section->get_rva())))
+    {
+        size_t size = SE_PAGE_SIZE;
+        sec_info_t sinfo;
+        memset(&sinfo, 0, sizeof(sinfo));
+        sinfo.flags = last_section->get_si_flags();
+        uint64_t rva = ROUND_TO_PAGE(last_section->get_rva() + last_section->virtual_size());
+        if(SGX_SUCCESS != (ret = build_pages(rva, size, 0, sinfo, ADD_EXTEND_PAGE)))
+            return ret;
     }
 
     return SGX_SUCCESS;
 }
 
-int CLoader::build_pages(const uint64_t start_rva, const uint64_t size, void *source, const sec_info_t &sinfo, const uint32_t attr)
+int CLoader::build_partial_page(const uint64_t rva, const uint64_t size, const void *source, const sec_info_t &sinfo, const uint32_t attr)
+{
+    // RVA may or may not be aligned.
+    uint64_t offset = PAGE_OFFSET(rva);
+
+    // Initialize the page with '0', this serves as both the padding at the start
+    // of the page (if it's not aligned) as well as the fill for any unitilized
+    // bytes at the end of the page, e.g. .bss data.
+    uint8_t page_data[SE_PAGE_SIZE];
+    memset(page_data, 0, SE_PAGE_SIZE);
+
+    // The amount of raw data may be less than the number of bytes on the page,
+    // but that portion of page_data has already been filled (see above).
+    memcpy_s(&page_data[offset], (size_t)(SE_PAGE_SIZE - offset), source, (size_t)size);
+
+    // Add the page, trimming the start address to make it page aligned.
+    return build_pages(TRIM_TO_PAGE(rva), SE_PAGE_SIZE, page_data, sinfo, attr);
+}
+
+int CLoader::build_pages(const uint64_t start_rva, const uint64_t size, const void *source, const sec_info_t &sinfo, const uint32_t attr)
 {
     int ret = SGX_SUCCESS;
     uint64_t offset = 0;
     uint64_t rva = start_rva;
 
+    assert(IS_PAGE_ALIGNED(start_rva) && IS_PAGE_ALIGNED(size));
+
     while(offset < size)
     {
         //call driver to add page;
-        if(SGX_SUCCESS != (ret = get_enclave_creator()->add_enclave_page(ENCLAVE_ID_IOCTL, source, rva, sinfo, attr)))
+        if(SGX_SUCCESS != (ret = get_enclave_creator()->add_enclave_page(ENCLAVE_ID_IOCTL, GET_PTR(void, source, 0), rva, sinfo, attr)))
         {
             //if add page failed , we should remove enclave somewhere;
             return ret;
@@ -243,59 +278,148 @@ int CLoader::build_pages(const uint64_t start_rva, const uint64_t size, void *so
 
     return SGX_SUCCESS;
 }
+
+int CLoader::post_init_action(layout_t *layout_start, layout_t *layout_end, uint64_t delta)
+{
+    int ret = SGX_SUCCESS;
+
+    for(layout_t *layout = layout_start; layout < layout_end; layout++)
+    {
+        if (!IS_GROUP_ID(layout->group.id) && (layout->entry.attributes & PAGE_ATTR_POST_REMOVE))
+        {
+            uint64_t start_addr = layout->entry.rva + delta + (uint64_t)get_start_addr();
+            uint64_t page_count = (uint64_t)layout->entry.page_count;
+            if (SGX_SUCCESS != (ret = get_enclave_creator()->trim_range(start_addr, start_addr + (page_count << SE_PAGE_SHIFT))))
+                return ret;
+
+        }
+        else if (IS_GROUP_ID(layout->group.id))
+        {
+            uint64_t step = 0;
+            for(uint32_t j = 0; j < layout->group.load_times; j++)
+            {
+                step += layout->group.load_step;
+                if(SGX_SUCCESS != (ret = post_init_action(&layout[-layout->group.entry_count], layout, step)))
+                    return ret;
+            }
+        }
+    }
+    return SGX_SUCCESS;
+}
+  
+int CLoader::post_init_action_commit(layout_t *layout_start, layout_t *layout_end, uint64_t delta)
+{
+    int ret = SGX_SUCCESS;
+
+    for(layout_t *layout = layout_start; layout < layout_end; layout++)
+    {
+        if (!IS_GROUP_ID(layout->group.id) && (layout->entry.attributes & PAGE_ATTR_POST_REMOVE))
+        {
+            uint64_t start_addr = layout->entry.rva + delta + (uint64_t)get_start_addr();
+            uint64_t page_count = (uint64_t)layout->entry.page_count;
+
+            for (uint64_t i = 0; i < page_count; i++)
+            {
+                if (SGX_SUCCESS != (ret = get_enclave_creator()->trim_accept(start_addr + (i << SE_PAGE_SHIFT))))
+                    return ret;
+            }
+        }
+        else if (IS_GROUP_ID(layout->group.id))
+        {
+            uint64_t step = 0;
+            for(uint32_t j = 0; j < layout->group.load_times; j++)
+            {
+                step += layout->group.load_step;
+                if(SGX_SUCCESS != (ret = post_init_action_commit(&layout[-layout->group.entry_count], layout, step)))
+                    return ret;
+            }
+        }
+    }
+    return SGX_SUCCESS;
+}
+      
 int CLoader::build_context(const uint64_t start_rva, layout_entry_t *layout)
 {
     int ret = SGX_ERROR_UNEXPECTED;
     uint8_t added_page[SE_PAGE_SIZE];
     sec_info_t sinfo;
+    memset(added_page, 0, SE_PAGE_SIZE);
     memset(&sinfo, 0, sizeof(sinfo));
     uint64_t rva = start_rva + layout->rva;
+    //uint64_t start_addr = (uint64_t)get_start_addr();
 
-    if (layout->content_offset)
+
+
+    assert(IS_PAGE_ALIGNED(rva));
+
+    if (layout->attributes & PAGE_ATTR_EADD)
     {
-        // assume TCS is only 1 page
-        if(layout->si_flags == SI_FLAGS_TCS)
-        {
-            memset(added_page, 0, SE_PAGE_SIZE);
-            memcpy_s(added_page, SE_PAGE_SIZE, GET_PTR(uint8_t, m_metadata, layout->content_offset), layout->content_size);
+        uint16_t attributes = layout->attributes;
+#ifdef SE_SIM
+        attributes = attributes & (uint16_t)(~PAGE_ATTR_EREMOVE);
+#endif
 
-            tcs_t *ptcs = reinterpret_cast<tcs_t*>(added_page);
-            ptcs->ossa += rva;
-            ptcs->ofs_base += rva;
-            ptcs->ogs_base += rva;
-            m_tcs_list.push_back(GET_PTR(tcs_t, m_start_addr, rva));
-            sinfo.flags = layout->si_flags;
-            if(SGX_SUCCESS != (ret = build_pages(rva, layout->page_count << SE_PAGE_SHIFT, added_page, sinfo, layout->attributes)))
+        if (layout->content_offset)
+        {
+            if(layout->si_flags == SI_FLAGS_TCS)
             {
-                return ret;
+                memset(added_page, 0, SE_PAGE_SIZE);
+                memcpy_s(added_page, SE_PAGE_SIZE, GET_PTR(uint8_t, m_metadata, layout->content_offset), layout->content_size);
+
+                tcs_t *ptcs = reinterpret_cast<tcs_t*>(added_page);
+                ptcs->ossa += rva;
+                ptcs->ofs_base += rva;
+                ptcs->ogs_base += rva;
+                if(!(attributes & PAGE_ATTR_EREMOVE))
+                {
+                    m_tcs_list.push_back(std::make_pair(GET_PTR(tcs_t, m_start_addr, rva), false));
+                }
+                sinfo.flags = layout->si_flags;
+                if(SGX_SUCCESS != (ret = build_pages(rva, ((uint64_t)layout->page_count) << SE_PAGE_SHIFT, added_page, sinfo, attributes)))
+                {
+                    return ret;
+                }
+            }
+            else // guard page should not have content_offset != 0 
+            {   
+                           
+                section_info_t sec_info = {GET_PTR(uint8_t, m_metadata, layout->content_offset), layout->content_size, rva, ((uint64_t)layout->page_count) << SE_PAGE_SHIFT, layout->si_flags, NULL};
+                if(SGX_SUCCESS != (ret = build_mem_region(sec_info)))
+                {
+                    return ret;
+                }
             }
         }
-        else // guard page should not have content_offset != 0 
+        else if (layout->si_flags != SI_FLAG_NONE)
         {
-            section_info_t sec_info = {GET_PTR(uint8_t, m_metadata, layout->content_offset), layout->content_size, rva, layout->page_count << SE_PAGE_SHIFT, layout->si_flags, NULL};
-            if(SGX_SUCCESS != (ret = build_mem_region(&sec_info)))
+            sinfo.flags = layout->si_flags;
+           
+            void *source = NULL;
+            if(layout->content_size)
+            {
+                for(uint32_t *p = (uint32_t *)added_page; p < GET_PTR(uint32_t, added_page, SE_PAGE_SIZE); p++)
+                {
+                    *p = layout->content_size;
+                }
+                source = added_page;
+            }
+            
+            if(SGX_SUCCESS != (ret = build_pages(rva, ((uint64_t)layout->page_count) << SE_PAGE_SHIFT, source, sinfo, layout->attributes)))
             {
                 return ret;
             }
+
         }
     }
-    else if (layout->si_flags != SI_FLAG_NONE)
-    {
-        sinfo.flags = layout->si_flags;
 
-        void *source = NULL;
-        if(layout->content_size)
+    if(layout->attributes & PAGE_ATTR_POST_ADD)
+    {
+#ifndef SE_SIM
+        if(layout->id == LAYOUT_ID_TCS_DYN)
         {
-            for(uint32_t *p = (uint32_t *)added_page; p < GET_PTR(uint32_t, added_page, SE_PAGE_SIZE); p++)
-            {
-                *p = layout->content_size;
-            }
-            source = added_page;
+            m_tcs_list.push_back(std::make_pair(GET_PTR(tcs_t, m_start_addr, rva), true));
         }
-        if(SGX_SUCCESS != (ret = build_pages(rva, layout->page_count << SE_PAGE_SHIFT, source, sinfo, layout->attributes)))
-        {
-            return ret;
-        }
+#endif
     }
     return SGX_SUCCESS;
 }
@@ -326,7 +450,7 @@ int CLoader::build_contexts(layout_t *layout_start, layout_t *layout_end, uint64
     }
     return SGX_SUCCESS;
 }
-int CLoader::build_secs(sgx_attributes_t * const secs_attr, sgx_misc_attribute_t * const misc_attr)
+int CLoader::build_secs(sgx_attributes_t * const secs_attr, sgx_config_id_t *config_id, sgx_config_svn_t config_svn, sgx_misc_attribute_t * const misc_attr)
 {
     memset(&m_secs, 0, sizeof(secs_t)); //should set resvered field of secs as 0.
     //create secs structure.
@@ -334,8 +458,15 @@ int CLoader::build_secs(sgx_attributes_t * const secs_attr, sgx_misc_attribute_t
     m_secs.size = m_metadata->enclave_size;
     m_secs.misc_select = misc_attr->misc_select;
 
-    memcpy_s(&m_secs.attributes,  sizeof(m_secs.attributes), secs_attr, sizeof(m_secs.attributes));
+    if(memcpy_s(&m_secs.attributes,  sizeof(m_secs.attributes), secs_attr, sizeof(m_secs.attributes)))
+        return SGX_ERROR_UNEXPECTED;
     m_secs.ssa_frame_size = m_metadata->ssa_frame_size;
+    if (config_id)
+    {
+        if (memcpy_s(m_secs.config_id, SGX_CONFIGID_SIZE, config_id, SGX_CONFIGID_SIZE))
+            return SGX_ERROR_UNEXPECTED;
+    }
+    m_secs.config_svn = config_svn;
 
     EnclaveCreator *enclave_creator = get_enclave_creator();
     if(NULL == enclave_creator)
@@ -343,24 +474,30 @@ int CLoader::build_secs(sgx_attributes_t * const secs_attr, sgx_misc_attribute_t
     int ret = enclave_creator->create_enclave(&m_secs, &m_enclave_id, &m_start_addr, is_ae(&m_metadata->enclave_css));
     if(SGX_SUCCESS == ret)
     {
-        SE_TRACE(SE_TRACE_NOTICE, "enclave start address = %p, size = %x\n", m_start_addr, m_metadata->enclave_size);
+        SE_TRACE(SE_TRACE_NOTICE, "enclave start address = %p, size = 0x%llx\n", m_start_addr, m_metadata->enclave_size);
     }
+	// m_secs.mr_enclave value is not set previously
+    if(memcpy_s(&m_secs.mr_enclave, sizeof(sgx_measurement_t), &m_metadata->enclave_css.body.enclave_hash, sizeof(sgx_measurement_t)))
+        return SGX_ERROR_UNEXPECTED;
+
     return ret;
 }
-int CLoader::build_image(SGXLaunchToken * const lc, sgx_attributes_t * const secs_attr, le_prd_css_file_t *prd_css_file, sgx_misc_attribute_t * const misc_attr)
+int CLoader::build_image(SGXLaunchToken * const lc, sgx_attributes_t * const secs_attr, sgx_config_id_t *config_id, sgx_config_svn_t config_svn, le_prd_css_file_t *prd_css_file, sgx_misc_attribute_t * const misc_attr)
 {
     int ret = SGX_SUCCESS;
 
-    if(SGX_SUCCESS != (ret = build_secs(secs_attr, misc_attr)))
+
+    if(SGX_SUCCESS != (ret = build_secs(secs_attr, config_id, config_svn, misc_attr)))
     {
         SE_TRACE(SE_TRACE_WARNING, "build secs failed\n");
         return ret;
     };
+
     // read reloc bitmap before patch the enclave file
     // If load_enclave_ex try to load the enclave for the 2nd time,
     // the enclave image is already patched, and parser cannot read the information.
     // For linux, there's no map conflict. We assume load_enclave_ex will not do the retry.
-    vector<uint8_t> bitmap;
+    std::vector<uint8_t> bitmap;
     if(!m_parser.get_reloc_bitmap(bitmap))
         return SGX_ERROR_INVALID_ENCLAVE;
 
@@ -396,10 +533,15 @@ int CLoader::build_image(SGXLaunchToken * const lc, sgx_attributes_t * const sec
         goto fail;
     }
 
+    if(get_enclave_creator()->use_se_hw() == true)
+    {
+        set_memory_protection(false);
+    }
+
     return SGX_SUCCESS;
 
 fail:
-    get_enclave_creator()->destroy_enclave(ENCLAVE_ID_IOCTL);
+    get_enclave_creator()->destroy_enclave(ENCLAVE_ID_IOCTL, m_secs.size);
 
     return ret;
 }
@@ -433,12 +575,12 @@ int CLoader::validate_layout_table()
 {
     layout_t *layout_start = GET_PTR(layout_t, m_metadata, m_metadata->dirs[DIR_LAYOUT].offset);
     layout_t *layout_end = GET_PTR(layout_t, m_metadata, m_metadata->dirs[DIR_LAYOUT].offset + m_metadata->dirs[DIR_LAYOUT].size);
-    vector<pair<uint64_t, uint64_t>> rva_vector;
+    std::vector<std::pair<uint64_t, uint64_t>> rva_vector;
     for (layout_t *layout = layout_start; layout < layout_end; layout++)
     {
         if(!IS_GROUP_ID(layout->entry.id))  // layout entry
         {
-            rva_vector.push_back(make_pair(layout->entry.rva, layout->entry.page_count << SE_PAGE_SHIFT));
+            rva_vector.push_back(std::make_pair(layout->entry.rva, ((uint64_t)layout->entry.page_count) << SE_PAGE_SHIFT));
             if(layout->entry.content_offset)
             {
                 if(false == is_metadata_buffer(layout->entry.content_offset, layout->entry.content_size))
@@ -467,7 +609,7 @@ int CLoader::validate_layout_table()
                     {
                         return SGX_ERROR_INVALID_METADATA;
                     }
-                    rva_vector.push_back(make_pair(entry->rva + load_step, entry->page_count << SE_PAGE_SHIFT));
+                    rva_vector.push_back(std::make_pair(entry->rva + load_step, ((uint64_t)entry->page_count) << SE_PAGE_SHIFT));
                     // no need to check integer overflow for entry->rva + load_step, because
                     // entry->rva and load_step are less than enclave_size, whose size is no more than 37 bit
                 }
@@ -475,7 +617,7 @@ int CLoader::validate_layout_table()
         }
     }
     sort(rva_vector.begin(), rva_vector.end());
-    for (vector<pair<uint64_t, uint64_t>>::iterator it = rva_vector.begin(); it != rva_vector.end(); it++)
+    for (std::vector<std::pair<uint64_t, uint64_t>>::iterator it = rva_vector.begin(); it != rva_vector.end(); it++)
     {
         if(!IS_PAGE_ALIGNED(it->first))
         {
@@ -517,17 +659,15 @@ int CLoader::validate_metadata()
 {
     if(!m_metadata)
         return SGX_ERROR_INVALID_METADATA;
-    uint64_t version = META_DATA_MAKE_VERSION(MAJOR_VERSION,MINOR_VERSION );
+    uint64_t urts_version = META_DATA_MAKE_VERSION(MAJOR_VERSION,MINOR_VERSION);
+
     //if the version of metadata does NOT match the version of metadata in urts, we should NOT launch enclave.
-    if(m_metadata->version != version)
+    if(MAJOR_VERSION_OF_METADATA(urts_version) < MAJOR_VERSION_OF_METADATA(m_metadata->version))
     {
         SE_TRACE(SE_TRACE_WARNING, "Mismatch between the metadata urts required and the metadata in use.\n");
         return SGX_ERROR_INVALID_VERSION;
     }
-    if(m_metadata->size > sizeof(metadata_t))
-    {
-        return SGX_ERROR_INVALID_METADATA;
-    }
+
     if(m_metadata->tcs_policy > TCS_POLICY_UNBIND)
         return SGX_ERROR_INVALID_METADATA;
     if(m_metadata->ssa_frame_size < SSA_FRAME_SIZE_MIN || m_metadata->ssa_frame_size > SSA_FRAME_SIZE_MAX)
@@ -581,7 +721,7 @@ bool CLoader::is_ae(const enclave_css_t *enclave_css)
     return false;
 }
 
-int CLoader::load_enclave(SGXLaunchToken *lc, int debug, const metadata_t *metadata, le_prd_css_file_t *prd_css_file, sgx_misc_attribute_t *misc_attr)
+int CLoader::load_enclave(SGXLaunchToken *lc, int debug, const metadata_t *metadata, sgx_config_id_t *config_id, sgx_config_svn_t config_svn, le_prd_css_file_t *prd_css_file, sgx_misc_attribute_t *misc_attr)
 {
     int ret = SGX_SUCCESS;
     sgx_misc_attribute_t sgx_misc_attr;
@@ -601,39 +741,30 @@ int CLoader::load_enclave(SGXLaunchToken *lc, int debug, const metadata_t *metad
         return ret;
     }
 
-    ret = build_image(lc, &sgx_misc_attr.secs_attr, prd_css_file, &sgx_misc_attr);
-    //return platform capability if fail. Otherwise, return secs.attr.
+    ret = build_image(lc, &sgx_misc_attr.secs_attr, config_id, config_svn, prd_css_file, &sgx_misc_attr);
+    // Update misc_attr with secs.attr upon success.
     if(SGX_SUCCESS == ret)
     {
+        //When run here EINIT success, so SGX_FLAGS_INITTED should be set by ucode. uRTS align it with EINIT instruction.
+        sgx_misc_attr.secs_attr.flags |= SGX_FLAGS_INITTED;
+        m_secs.attributes = sgx_misc_attr.secs_attr;
         if(misc_attr)
         {
             memcpy_s(misc_attr, sizeof(sgx_misc_attribute_t), &sgx_misc_attr, sizeof(sgx_misc_attribute_t));
-            //When run here EINIT success, so SGX_FLAGS_INITTED should be set by ucode. uRTS align it with EINIT instruction.
-            misc_attr->secs_attr.flags |= SGX_FLAGS_INITTED;
-        }
-    }
-    else
-    {
-        if(misc_attr)
-        {
-            sgx_misc_attribute_t plat_cap;
-            memset(&plat_cap, 0, sizeof(plat_cap));
-            get_enclave_creator()->get_plat_cap(&plat_cap);
-            memcpy_s(misc_attr, sizeof(sgx_misc_attribute_t), &plat_cap, sizeof(sgx_misc_attribute_t));
         }
     }
 
     return ret;
 }
 
-int CLoader::load_enclave_ex(SGXLaunchToken *lc, bool debug, const metadata_t *metadata, le_prd_css_file_t *prd_css_file, sgx_misc_attribute_t *misc_attr)
+int CLoader::load_enclave_ex(SGXLaunchToken *lc, bool debug, const metadata_t *metadata, sgx_config_id_t *config_id, sgx_config_svn_t config_svn, le_prd_css_file_t *prd_css_file, sgx_misc_attribute_t *misc_attr)
 {
     unsigned int ret = SGX_SUCCESS, map_conflict_count = 3;
     bool retry = true;
 
     while (retry)
     {
-        ret = this->load_enclave(lc, debug, metadata, prd_css_file, misc_attr);
+        ret = this->load_enclave(lc, debug, metadata, config_id, config_svn, prd_css_file, misc_attr);
         switch(ret)
         {
             //If CreateEnclave failed due to power transition, we retry it.
@@ -660,70 +791,37 @@ int CLoader::load_enclave_ex(SGXLaunchToken *lc, bool debug, const metadata_t *m
 
 int CLoader::destroy_enclave()
 {
-    return get_enclave_creator()->destroy_enclave(ENCLAVE_ID_IOCTL);
+    return get_enclave_creator()->destroy_enclave(ENCLAVE_ID_IOCTL, m_secs.size);
 }
 
-int CLoader::set_memory_protection()
+int CLoader::set_memory_protection(bool is_after_initialization)
 {
-
-    uint64_t rva = 0;
-    uint64_t len = 0;
-    uint64_t last_section_end = 0;
-    unsigned int i = 0;
     int ret = 0;
-    //for sections
-    std::vector<Section*> sections = m_parser.get_sections();
-
-    for(i = 0; i < sections.size() ; i++)
+    //set memory protection for segments
+    if(m_parser.set_memory_protection((uint64_t)m_start_addr, is_after_initialization) != true)
     {
-        //require the sec_info.rva be page aligned, we need handle the first page.
-        //the first page;
-        uint64_t offset = (sections[i]->get_rva() & (SE_PAGE_SIZE -1));
-        uint64_t size = SE_PAGE_SIZE - offset;
-
-        //the raw data may be smaller than the size, we get the min of them
-        if(sections[i]->raw_data_size() < size)
-            size = sections[i]->raw_data_size();
-
-        len = SE_PAGE_SIZE;
-
-        //if there is more pages, then calc the next paged aligned pages
-        if((sections[i]->virtual_size() + offset) >  SE_PAGE_SIZE)
-        {
-            uint64_t raw_data_size = sections[i]->raw_data_size() - size;
-            //we need use (SE_PAGE_SIZE - offset), because (SE_PAGE_SIZE - offset) may larger than size
-            uint64_t virtual_size = sections[i]->virtual_size() - (SE_PAGE_SIZE - offset);
-            len += ROUND_TO_PAGE(raw_data_size);
-
-            if(ROUND_TO_PAGE(virtual_size) > ROUND_TO_PAGE(raw_data_size))
-            {
-                len += ROUND_TO_PAGE(virtual_size) - ROUND_TO_PAGE(raw_data_size);
-            }
-        }
-        rva = TRIM_TO_PAGE(sections[i]->get_rva()) + (uint64_t)m_start_addr;
-        ret = mprotect((void*)rva, (size_t)len, (int)(sections[i]->get_si_flags()&SI_MASK_MEM_ATTRIBUTE));
-        if(ret != 0)
-        {
-            SE_TRACE(SE_TRACE_WARNING, "section[%d]:mprotect(rva=%" PRIu64 ", len=%" PRIu64 ", flags=%" PRIu64 ") failed\n",
-                     i, rva, len, (sections[i]->get_si_flags()));
-            return SGX_ERROR_UNEXPECTED;
-        }
-        //there is a gap between sections, need to set those to NONE access
-        if(last_section_end != 0)
-        {
-            ret = mprotect((void*)last_section_end, (size_t)(rva - last_section_end), (int)(SI_FLAG_NONE & SI_MASK_MEM_ATTRIBUTE));
-            if(ret != 0)
-            {
-                SE_TRACE(SE_TRACE_WARNING, "set protection for gap before section[%d]:mprotect(rva=%" PRIu64 ", len=%" PRIu64 ", flags=%" PRIu64 ") failed\n",
-                         i, last_section_end, rva - last_section_end, SI_FLAG_NONE);
-                return SGX_ERROR_UNEXPECTED;
-            }
-        }
-        last_section_end = rva + len;
+        return SGX_ERROR_UNEXPECTED;
     }
 
-    ret = set_context_protection(GET_PTR(layout_t, m_metadata, m_metadata->dirs[DIR_LAYOUT].offset), 
-                                    GET_PTR(layout_t, m_metadata, m_metadata->dirs[DIR_LAYOUT].offset + m_metadata->dirs[DIR_LAYOUT].size), 
+    if (is_after_initialization &&
+            (META_DATA_MAKE_VERSION(MAJOR_VERSION,MINOR_VERSION) <= m_metadata->version) &&
+            get_enclave_creator()->is_EDMM_supported(get_enclave_id()))
+    {
+        std::vector<std::tuple<uint64_t, uint64_t, uint32_t>> pages_to_protect;
+        m_parser.get_pages_to_protect((uint64_t)m_start_addr, pages_to_protect);
+        for (auto page : pages_to_protect)
+        {   uint64_t start = 0, len = 0;
+            uint32_t perm = 0;
+            std::tie(start, len, perm) = page;
+            ret = get_enclave_creator()->emodpr(start, len, (uint64_t)perm);
+            if (ret != SGX_SUCCESS)
+                return SGX_ERROR_UNEXPECTED;
+        }
+    }
+
+    //set memory protection for context
+    ret = set_context_protection(GET_PTR(layout_t, m_metadata, m_metadata->dirs[DIR_LAYOUT].offset),
+                                    GET_PTR(layout_t, m_metadata, m_metadata->dirs[DIR_LAYOUT].offset + m_metadata->dirs[DIR_LAYOUT].size),
                                     0);
     if (SGX_SUCCESS != ret)
     {
@@ -742,22 +840,36 @@ int CLoader::set_context_protection(layout_t *layout_start, layout_t *layout_end
         if (!IS_GROUP_ID(layout->group.id))
         {
             int prot = 0 ;
-            if(layout->entry.attributes == SI_FLAG_NONE)
+            if(layout->entry.si_flags == SI_FLAG_NONE)
             {
                 prot = SI_FLAG_NONE & SI_MASK_MEM_ATTRIBUTE;
             }
             else
             {
                 prot = SI_FLAGS_RW & SI_MASK_MEM_ATTRIBUTE;
+#ifndef SE_SIM
+
+                //when a page is eremoved when loading, we should set this page to none access. 
+                //if this page is accessed, a sigbus exception will be raised.
+                uint16_t attributes = layout->entry.attributes;
+                if(attributes & PAGE_ATTR_EADD && attributes & PAGE_ATTR_EREMOVE)
+                {
+                    if(attributes & PAGE_ATTR_EREMOVE)
+                    {
+                        prot = SI_FLAG_NONE & SI_MASK_MEM_ATTRIBUTE;
+                    }
+                }
+#endif                          
             }
+
             ret = mprotect(GET_PTR(void, m_start_addr, layout->entry.rva + delta), 
-                               (size_t)(layout->entry.page_count << SE_PAGE_SHIFT),
+                               (size_t)layout->entry.page_count << SE_PAGE_SHIFT,
                                prot); 
             if(ret != 0)
             {
                 SE_TRACE(SE_TRACE_WARNING, "mprotect(rva=%" PRIu64 ", len=%" PRIu64 ", flags=%d) failed\n",
                          (uint64_t)m_start_addr + layout->entry.rva + delta, 
-                         (uint64_t)(layout->entry.page_count << SE_PAGE_SHIFT), 
+                         (uint64_t)layout->entry.page_count << SE_PAGE_SHIFT, 
                           prot);
                 return SGX_ERROR_UNEXPECTED;
             }

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -177,8 +177,8 @@ static int _EGETKEY(sgx_key_request_t* kr, sgx_key_128bit_t okey)
         memcpy(&dd.ddrk.key_id, &kr->key_id, sizeof(sgx_key_id_t));
         break;
 
-    case SGX_KEYSELECT_LICENSE:
-        check_attr_flag(cur_secs, SGX_FLAGS_LICENSE_KEY);
+    case SGX_KEYSELECT_EINITTOKEN:
+        check_attr_flag(cur_secs, SGX_FLAGS_EINITTOKEN_KEY);
         check_isv_svn(kr, cur_secs);
         check_cpu_svn(kr);
 
@@ -284,16 +284,20 @@ static void _EREPORT(const sgx_target_info_t* ti, const sgx_report_data_t* rd, s
 
 
 static void
+_EEXIT(uintptr_t dest, uintptr_t xcx, uintptr_t xdx, uintptr_t xsi, uintptr_t xdi) __attribute__((section(".nipx")));
+
+// The call to load_regs assumes the existence of a frame pointer.
+LOAD_REGS_ATTRIBUTES
+static void
 _EEXIT(uintptr_t dest, uintptr_t xcx, uintptr_t xdx, uintptr_t xsi, uintptr_t xdi)
 {
     // By simulator convention, XDX contains XBP and XCX contains XSP.
 
     enclu_regs_t regs;
-    // when the code jump back to the ip after EENTER, the simulation code unwind the stack
-    // by adding 6*sizeof(uintptr_t), so we substract it in advance.
-    regs.xsp = xcx - 6 * sizeof(uintptr_t);
-    regs.xbp = xdx;
-    regs.xip = dest;
+    regs.xsp = xcx;   // xcx = xsp = ssa.rsp_u
+    regs.xbp = xdx;   // xdx = xbp = ssa.rbp_u
+    regs.xip = dest;  // dest= xbx = xcx on EENTER = return address
+    // For the value of ssa.rsp_u, ssa.rbp_u, and return address, see _EENTER in u_instruction.cpp
 
     tcs_t *tcs = GET_TCS_PTR(xdx);
     GP_ON(tcs == NULL);
@@ -314,14 +318,19 @@ _EEXIT(uintptr_t dest, uintptr_t xcx, uintptr_t xdx, uintptr_t xsi, uintptr_t xd
 
     load_regs(&regs);
 
+    // jump back to the instruction after the call to _SE3
+    // common/inc/internal/linux/linux-regs.h:
+    //    call    _SE3
+    //  ---------------------------> jump here
+    // #   ifdef LINUX32
+    //     add     $(SE_WORDSIZE * 6), %esp
+    // #   endif
+
     // Never returns.....
 }
 
 
 // Master entry functions
-
-#pragma GCC push_options
-#pragma GCC optimize ("O0")
 
 uintptr_t _SE3(uintptr_t xax, uintptr_t xbx, uintptr_t xcx,
                uintptr_t xdx, uintptr_t xsi, uintptr_t xdi)
@@ -347,5 +356,3 @@ uintptr_t _SE3(uintptr_t xax, uintptr_t xbx, uintptr_t xcx,
     GP();
     return (uintptr_t)-1;
 }
-
-#pragma GCC pop_options

@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+# Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -47,7 +47,7 @@ CPPFLAGS += -I$(LINUX_SDK_DIR)/trts       \
 
 CPP_SRCS := $(wildcard memory_manage/new*.cpp) \
             $(wildcard memory_manage/delete*.cpp)
-CPP_SRCS += tstdcxx_version.cpp
+CPP_SRCS += tcxx_version.cpp
 
 CC_SRCS  := $(wildcard $(LINUXDIR)/*.cc)
 C_SRCS   := $(filter-out $(LINUXDIR)/libelftc_dem_gnu3.c, $(wildcard $(LINUXDIR)/*.c))
@@ -56,7 +56,7 @@ CPP_OBJS := $(CPP_SRCS:.cpp=.o)
 CC_OBJS  := $(CC_SRCS:.cc=.o)
 C_OBJS   := $(C_SRCS:.c=.o)
 
-OBJS := $(CPP_OBJS) $(C_OBJS) $(CC_OBJS)
+OBJS := $(sort $(CPP_OBJS) $(C_OBJS) $(CC_OBJS))
 
 $(C_OBJS): %.o: %.c
 	$(CC) -c  $(CFLAGS)   $(CPPFLAGS) $< -o $@
@@ -79,9 +79,6 @@ $(CPPRT): $(OBJS) prepare-libunwind libunwind
 	$(CP) linux/libunwind/src/.libs/libunwind.a $(CPPRT)
 	$(AR) rs $@ $(OBJS)
 
-$(CPPRT): CC  = gcc
-$(CPPRT): CXX = g++
-
 .PHONY: libunwind
 libunwind:
 	cd linux/libunwind/ && ( test -f Makefile || ./autogen-linux.sh ) && $(MAKE) -j5
@@ -89,8 +86,10 @@ libunwind:
 
 .PHONY: clean
 clean:
-	@-$(MAKE) -C linux/libunwind distclean
 	@$(RM) $(OBJS) $(CPPRT)
+ifeq ("$(shell test -f linux/libunwind/Makefile && echo Makefile exists)", "Makefile exists")	
+	@-$(MAKE) -C linux/libunwind distclean
+endif
 	@$(RM) -r linux/libunwind/INSTALL             \
               linux/libunwind/Makefile.in         \
               linux/libunwind/aclocal.m4          \

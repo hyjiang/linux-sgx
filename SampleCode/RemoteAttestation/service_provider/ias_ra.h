@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -36,7 +36,6 @@
 
 #include "ecp.h"
 
-// These status should align with the definition in IAS API spec(rev 0.6)
 typedef enum {
     IAS_QUOTE_OK,
     IAS_QUOTE_SIGNATURE_INVALID,
@@ -200,7 +199,7 @@ int ias_enroll(int sp_credentials, sample_spid_t* spid,
                int* authentication_token);
 int ias_get_sigrl(const sample_epid_group_id_t gid, uint32_t* p_sig_rl_size,
                uint8_t** p_sig_rl);
-int ias_verify_attestation_evidence(sample_quote_t* p_isv_quote,
+int ias_verify_attestation_evidence(const sample_quote_t* p_isv_quote,
                uint8_t* pse_manifest,
                ias_att_report_t* attestation_verification_report);
 #ifdef  __cplusplus

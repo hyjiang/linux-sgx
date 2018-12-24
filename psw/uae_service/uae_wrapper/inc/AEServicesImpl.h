@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -32,39 +32,16 @@
 #define __AE_SERVICES_IMPL_H__
 
 #include <AEServicesProvider.h>
-#include <AEInternalServicesProvider.h>
-#include <AEInternalServices.h>
+#include <AEServices.h>
 
 class ITransporter;
 
-class AEServicesImpl : public AEInternalServices{
+class AEServicesImpl : public AEServices{
     public:
         ~AEServicesImpl();
+        virtual uae_oal_status_t InternalInterface(IAERequest* request, IAEResponse* response, uint32_t timeout_msec =0);
 
-       QuoteInfo* GetQuote(const Report* report, const uint32_t quoteType, const SPID* spid, const Nonce* nonce, 
-                                const SignatureRevocationList* sig_rl, const uint32_t bufSize, const bool qe_report, uint32_t timeout_msec=0); 
-
-        AttestationInformation* InitQuote(uint32_t timeout_msec=0);
-
-        LaunchToken* GetLaunchToken(EnclaveMeasurement *mr_enclave,
-                                      Signature          *mr_signer,
-                                      SEAttributes       *se_attributes,
-                                        uint32_t timeout_msec=0);
-
-        CreateSessionInformation* CreateSession(uint32_t dhMsg1Size, uint32_t timeout = 0);
-
-        PSEMessage* InvokeService(PSEMessage* targetServiceMessage, uint32_t pseResponseSize, uint32_t timeout = 0);
-
-        PlainData*  ExchangeReport(uint32_t sessionId, PlainData* dhMsg, uint32_t pseResponseSize, uint32_t timeout = 0);
-
-        PlainData* CloseSession(uint32_t sessionId, uint32_t timeout = 0);
-        
-        PsCap* GetPsCap(uint32_t timeout_msec=0);
-
-        AttestationStatus* ReportAttestationError(const PlatformInfo* platformInfo, uint32_t attestation_error_code, uint32_t updateInfoLength,uint32_t timeout_msec=0) ;
-        
         friend AEServices* AEServicesProvider::GetServicesProvider();
-        friend AEInternalServices* AEInternalServicesProvider::GetInternalServicesProvider();
 
     protected:
         AEServicesImpl(const char* socketbase);

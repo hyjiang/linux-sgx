@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -32,10 +32,12 @@
 /**
 * File: sample_libcrypto.h
 * Description:
-*     Interface for generic crypto library APIs. This library does NOT have
-*     production quality crypto implementations. 
-*     Some methods have been constructed to facilitate reproduceable results to
-*     aid in the debugging of the sample application.
+*  Interface for generic crypto library APIs. 
+*  Do NOT use this library in your actual product.
+*  The purpose of this sample library is to aid the debugging of a
+*  remote attestation service.
+*  To achieve that goal, the sample remote attestation application
+*  will use this sample library to generate reproducible messages.
 */
 
 #ifndef SAMPLE_LIBCRYPTO_H

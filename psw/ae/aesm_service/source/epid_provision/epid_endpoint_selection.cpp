@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -51,13 +51,13 @@ static ae_error_t prov_es_gen_header(provision_request_header_t *es_header,
     //initialize ES Msg1 Header
     es_header->protocol = ENDPOINT_SELECTION;
     es_header->type = TYPE_ES_MSG1;
-    es_header->version = TLV_VERSION_1;
-    if(0!=memcpy_s(es_header->xid, XID_SIZE, xid, XID_SIZE)){
+    es_header->version = TLV_VERSION_2;
+    if(0!=memcpy_s(es_header->xid, sizeof(es_header->xid), xid, XID_SIZE)){
         AESM_DBG_FATAL("memcpy error");
         return PVE_UNEXPECTED_ERROR;
     }
     uint32_t size_in;
-    size_in = _htonl(total_size);//big endian size required in msg header
+    size_in = _htonl(total_size);//use as a tmp size, big endian required in msg header
     if(0!=memcpy_s(&es_header->size,sizeof(es_header->size), &size_in, sizeof(size_in))){
         AESM_DBG_FATAL("memcpy error");
         return PVE_UNEXPECTED_ERROR;
@@ -82,7 +82,7 @@ uint32_t CPVEClass::gen_es_msg1(
 
     ret = prov_es_gen_header(es_header, es_output.xid, msg_size);
     if(AE_SUCCESS != ret){
-        AESM_DBG_ERROR("Fail to generate Endpoint Selection Msg1 Header:%d",ret);
+        AESM_DBG_ERROR("Fail to generate Endpoint Selection Msg1 Header:(ae%d)",ret);
         return ret;
     }
 
@@ -91,7 +91,7 @@ uint32_t CPVEClass::gen_es_msg1(
         tlv_status_t tlv_status = tlvs_msg.add_es_selector(SE_EPID_PROVISIONING, es_output.selector_id);
         ret = tlv_error_2_pve_error(tlv_status);
         if(AE_SUCCESS!=ret){
-            AESM_DBG_ERROR("fail to create ES Selector TLV:%d",ret);
+            AESM_DBG_ERROR("fail to create ES Selector TLV:(ae%d)",ret);
             return ret;
         }
         assert(tlvs_msg.get_tlv_msg_size()<=msg_size - PROVISION_REQUEST_HEADER_SIZE); //The checking should have been done in prov_es_gen_header
@@ -112,7 +112,7 @@ uint32_t CPVEClass::proc_es_msg2(
     char server_url[MAX_PATH],
     uint16_t& ttl,
     const uint8_t xid[XID_SIZE],
-    uint8_t rsa_signature[PVE_RSA_KEY_BYTES],
+    uint8_t rsa_signature[RSA_3072_KEY_BYTES],
     signed_pek_t& pek)
 {
     uint32_t ae_ret = PVE_MSG_ERROR;
@@ -127,13 +127,13 @@ uint32_t CPVEClass::proc_es_msg2(
         goto final_point;
     }
     //first checking resp header for protocol, version and type
-    if(resp_header->protocol != ENDPOINT_SELECTION || resp_header->version!=TLV_VERSION_1 || resp_header->type != TYPE_ES_MSG2){
+    if(resp_header->protocol != ENDPOINT_SELECTION || resp_header->version!=TLV_VERSION_2 || resp_header->type != TYPE_ES_MSG2){
         AESM_DBG_ERROR("ES Msg2 header error");
         goto final_point;
     }
     ae_ret = check_endpoint_pg_stauts(resp_header);
     if(AE_SUCCESS != ae_ret){
-        AESM_DBG_ERROR("Backend report error in ES Msg2 Header:%d",ae_ret);
+        AESM_DBG_ERROR("Backend report error in ES Msg2 Header:(ae%d)",ae_ret);
         goto final_point;
     }
     if(0!=memcmp(xid, resp_header->xid, XID_SIZE)){
@@ -150,7 +150,7 @@ uint32_t CPVEClass::proc_es_msg2(
     tlv_status = tlvs_msg.init_from_buffer(resp_body, msg_size - static_cast<uint32_t>(PROVISION_RESPONSE_HEADER_SIZE));
     ae_ret = tlv_error_2_pve_error(tlv_status);
     if(AE_SUCCESS!=ae_ret){
-        AESM_DBG_ERROR("Fail to decode ES Msg2:%d",ae_ret);
+        AESM_DBG_ERROR("Fail to decode ES Msg2:(ae%d)",ae_ret);
         goto final_point;
     }
     if(tlvs_msg.get_tlv_count() != ES_MSG2_FIELD_COUNT){//three TLVs
@@ -170,24 +170,24 @@ uint32_t CPVEClass::proc_es_msg2(
         goto final_point;
     }
     if(tlvs_msg[1].type != TLV_SIGNATURE || tlvs_msg[1].version != TLV_VERSION_1 ||
-        tlvs_msg[1].header_size!=SMALL_TLV_HEADER_SIZE||tlvs_msg[1].size != PVE_RSA_KEY_BYTES+1 ||
-        tlvs_msg[1].payload[0] != PEK_PRIV){
+        tlvs_msg[1].header_size!=SMALL_TLV_HEADER_SIZE||tlvs_msg[1].size != RSA_3072_KEY_BYTES+1 ||
+        tlvs_msg[1].payload[0] != PEK_3072_PRIV){
         ae_ret = PVE_MSG_ERROR;
-        AESM_DBG_ERROR("Invalid Signature TLV: type %d, version %d, size %d while expected value is %d, %d, %d", 
+        AESM_DBG_ERROR("Invalid Signature TLV: type (tlv%d), version %d, size %d while expected value is (tlv%d,) %d, %d",
             tlvs_msg[1].type, tlvs_msg[1].version, tlvs_msg[1].size,
-            TLV_SIGNATURE, TLV_VERSION_1, PVE_RSA_KEY_BYTES);
+            TLV_SIGNATURE, TLV_VERSION_1, RSA_3072_KEY_BYTES);
         goto final_point;
     }
-    if(tlvs_msg[2].type != TLV_PEK || tlvs_msg[2].version != TLV_VERSION_1 ||
+    if(tlvs_msg[2].type != TLV_PEK || tlvs_msg[2].version != TLV_VERSION_2 ||
         tlvs_msg[2].header_size!=SMALL_TLV_HEADER_SIZE||tlvs_msg[2].size != sizeof(signed_pek_t)){
             ae_ret = PVE_MSG_ERROR;
-        AESM_DBG_ERROR("Invalid PEK TLV: type %d, version %d, size %d while expected value is %d, %d, %d", 
+        AESM_DBG_ERROR("Invalid PEK TLV: type (tlv%d), version %d, size %d while expected value is (tlv%d), %d, %d",
             tlvs_msg[2].type, tlvs_msg[2].version, tlvs_msg[2].size,
-            TLV_PEK, TLV_VERSION_1, sizeof(signed_pek_t));
+            TLV_PEK, TLV_VERSION_2, sizeof(signed_pek_t));
         goto final_point;
     }
     //skip the byte for KEY_ID
-    if(memcpy_s(rsa_signature, PVE_RSA_KEY_BYTES, tlvs_msg[1].payload+1, tlvs_msg[1].size-1)!=0){
+    if(memcpy_s(rsa_signature, RSA_3072_KEY_BYTES, tlvs_msg[1].payload+1, tlvs_msg[1].size-1)!=0){//skip key id
         ae_ret = AE_FAILURE;
         AESM_DBG_ERROR("memcpy failed");
         goto final_point;

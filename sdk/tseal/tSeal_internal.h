@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -36,10 +36,7 @@
 #include <stdint.h>
 #include "sgx_tseal.h"
 
-/* set MISCMASK.exinfo_bit = 0 for data migration to the enclave 
-   built with the SDK that supports exinfo bit */
-#define SGX_MISCSEL_EXINFO     0x00000001  /* report #PF and #GP inside enclave */
-#define TSEAL_DEFAULT_MISCMASK (~SGX_MISCSEL_EXINFO)
+#define KEY_POLICY_KSS  (SGX_KEYPOLICY_CONFIGID | SGX_KEYPOLICY_ISVFAMILYID | SGX_KEYPOLICY_ISVEXTPRODID)
 
 #ifdef __cplusplus
 extern "C" {

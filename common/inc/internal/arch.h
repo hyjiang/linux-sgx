@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -44,13 +44,10 @@
 
 #pragma pack(push, 1)
 
-#if !defined(__cplusplus) || defined(__INTEL_COMPILER) || (defined(SE_GNU) && !defined(__GXX_EXPERIMENTAL_CXX0X__))
+#define STATIC_ASSERT_UNUSED_ATTRIBUTE __attribute__((unused))
 #define _ASSERT_CONCAT(a, b) a##b
 #define ASSERT_CONCAT(a, b) _ASSERT_CONCAT(a, b)
-#define se_static_assert(e) typedef char ASSERT_CONCAT(assert_line, __LINE__)[(e)?1:-1]
-#else
-#define se_static_assert(e) static_assert(e,#e)
-#endif
+#define se_static_assert(e) typedef char ASSERT_CONCAT(assert_line, __LINE__)[(e)?1:-1] STATIC_ASSERT_UNUSED_ATTRIBUTE
 
 se_static_assert(sizeof(sgx_key_request_t) == 512);
 se_static_assert(sizeof(sgx_target_info_t) == 512);
@@ -69,13 +66,16 @@ typedef struct _secs_t
 #define SECS_RESERVED2_LENGTH 32
     uint8_t                     reserved2[SECS_RESERVED2_LENGTH];  /* ( 96) reserved */
     sgx_measurement_t           mr_signer;      /* (128) Integrity Reg 1 - Enclave signing key */
-#define SECS_RESERVED3_LENGTH 96
+#define SECS_RESERVED3_LENGTH 32
     uint8_t                     reserved3[SECS_RESERVED3_LENGTH];  /* (160) reserved */
+    sgx_config_id_t             config_id;      /* (192) CONFIGID */
     sgx_prod_id_t               isv_prod_id;    /* (256) product ID of enclave */
     sgx_isv_svn_t               isv_svn;        /* (258) Security Version of the Enclave */
-#define SECS_RESERVED4_LENGTH 3836
-    uint8_t                     reserved4[SECS_RESERVED4_LENGTH];/* (260) reserved */
+    sgx_config_svn_t            config_svn;     /* (260) CONFIGSVN */
+#define SECS_RESERVED4_LENGTH 3834
+    uint8_t                     reserved4[SECS_RESERVED4_LENGTH];/* (262) reserved */
 } secs_t;
+
 
 /*
 TCS
@@ -161,6 +161,10 @@ typedef uint64_t si_flags_t;
 #define SI_FLAG_SECS                (0x00<<SI_FLAG_PT_LOW_BIT)      /* SECS */
 #define SI_FLAG_TCS                 (0x01<<SI_FLAG_PT_LOW_BIT)      /* TCS */
 #define SI_FLAG_REG                 (0x02<<SI_FLAG_PT_LOW_BIT)      /* Regular Page */
+#define SI_FLAG_TRIM                (0x04<<SI_FLAG_PT_LOW_BIT)      /* Trim Page */
+#define SI_FLAG_PENDING             0x8
+#define SI_FLAG_MODIFIED            0x10
+#define SI_FLAG_PR                  0x20
 
 #define SI_FLAGS_EXTERNAL           (SI_FLAG_PT_MASK | SI_FLAG_R | SI_FLAG_W | SI_FLAG_X)   /* Flags visible/usable by instructions */
 #define SI_FLAGS_R                  (SI_FLAG_R|SI_FLAG_REG)
@@ -192,6 +196,7 @@ typedef struct _page_info_t
 #define SE_KEY_SIZE         384         /* in bytes */
 #define SE_EXPONENT_SIZE    4           /* RSA public key exponent size in bytes */
 
+
 typedef struct _css_header_t {        /* 128 bytes */
     uint8_t  header[12];                /* (0) must be (06000000E100000000000100H) */
     uint32_t type;                      /* (12) bit 31: 0 = prod, 1 = debug; Bit 30-0: Must be zero */
@@ -210,16 +215,18 @@ typedef struct _css_key_t {           /* 772 bytes */
 } css_key_t;
 se_static_assert(sizeof(css_key_t) == 772);
 
-typedef struct _css_body_t {            /* 128 bytes */
-    sgx_misc_select_t   misc_select;    /* (900) The MISCSELECT that must be set */
-    sgx_misc_select_t   misc_mask;      /* (904) Mask of MISCSELECT to enforce */
-    uint8_t             reserved[20];   /* (908) Reserved. Must be 0. */
-    sgx_attributes_t    attributes;     /* (928) Enclave Attributes that must be set */
-    sgx_attributes_t    attribute_mask; /* (944) Mask of Attributes to Enforce */
-    sgx_measurement_t   enclave_hash;   /* (960) MRENCLAVE - (32 bytes) */
-    uint8_t             reserved2[32];  /* (992) Must be 0 */
-    uint16_t            isv_prod_id;    /* (1024) ISV assigned Product ID */
-    uint16_t            isv_svn;        /* (1026) ISV assigned SVN */
+typedef struct _css_body_t {             /* 128 bytes */
+    sgx_misc_select_t    misc_select;    /* (900) The MISCSELECT that must be set */
+    sgx_misc_select_t    misc_mask;      /* (904) Mask of MISCSELECT to enforce */
+    uint8_t              reserved[4];    /* (908) Reserved. Must be 0. */
+    sgx_isvfamily_id_t   isv_family_id;  /* (912) ISV assigned Family ID */
+    sgx_attributes_t     attributes;     /* (928) Enclave Attributes that must be set */
+    sgx_attributes_t     attribute_mask; /* (944) Mask of Attributes to Enforce */
+    sgx_measurement_t    enclave_hash;   /* (960) MRENCLAVE - (32 bytes) */
+    uint8_t              reserved2[16];  /* (992) Must be 0 */
+    sgx_isvext_prod_id_t isvext_prod_id; /* (1008) ISV assigned Extended Product ID */
+    uint16_t             isv_prod_id;    /* (1024) ISV assigned Product ID */
+    uint16_t             isv_svn;        /* (1026) ISV assigned SVN */
 } css_body_t;
 se_static_assert(sizeof(css_body_t) == 128);
 
@@ -269,9 +276,9 @@ se_static_assert(sizeof(token_t) == 304);
 
 typedef struct _wl_cert_t                           /* All fields except the mr_signer_list fields, are big-endian integer format */
 {
-    uint16_t                version;                /* ( 0) White List Cert format version. For 2015, only valid version is 1 */
+    uint16_t                version;                /* ( 0) White List Cert format version. Currently, only valid version is 1 */
     uint16_t                cert_type;              /* ( 2) White List Cert Type. For Enclave Signing Key White List Cert, must be 1 */
-    uint16_t                provider_id;            /* ( 4) Enclave Signing Key White List Provider ID to identify the key used to sign this Enclave signing Key White List Certificate. For 2015, only one White List Provider is approved: WLProviderID-ISecG = 0 */
+    uint16_t                provider_id;            /* ( 4) Enclave Signing Key White List Provider ID to identify the key used to sign this Enclave signing Key White List Certificate. Currently, only one White List Provider is approved: WLProviderID-ISecG = 0 */
     uint16_t                le_prod_id;             /* ( 6) Launch Enclave ProdID the White List Cert applies to. Linux LE-ProdID = 0x20 */
     uint32_t                wl_version;             /* ( 8) Version of the Enclave Signing Key White List. For a specific LE-ProdID, should increase on every WL Cert signing request */
     uint32_t                entry_number;           /* (12) Number of MRSIGNER entries in the Cert. If the White List Certificate allows enclave signed by any key to launch, the White List Cert must only contain one all-0 MRSIGNER entry. */
@@ -279,10 +286,10 @@ typedef struct _wl_cert_t                           /* All fields except the mr_
 }wl_cert_t;
 typedef struct _wl_provider_cert_t                  /* All fields are big endian */
 {
-    uint16_t                version;                /* ( 0) White List Cert format version. For 2015, only valid version is 1 */
+    uint16_t                version;                /* ( 0) White List Cert format version. Currently, only valid version is 1 */
     uint16_t                cert_type;              /* ( 2) White List Cert Type, For Enclave Signing Key White List Signer Cert, must be 0 */
-    uint16_t                provider_id;            /* ( 4) Enclave Signing Key White List Signer ID assigned by the White List Root CA. For 2015, only one White List Provider is approved: WLProviderID-ISecG = 0 */
-    uint16_t                root_id;                /* ( 6) Identify the White List Root CA key used to sign the Cert. For 2015, only one WLRootID is valid: WLRootID-iKGF-Key-0 = 0 */
+    uint16_t                provider_id;            /* ( 4) Enclave Signing Key White List Signer ID assigned by the White List Root CA. Currently, only one White List Provider is approved: WLProviderID-ISecG = 0 */
+    uint16_t                root_id;                /* ( 6) Identify the White List Root CA key used to sign the Cert. Currently, only one WLRootID is valid: WLRootID-iKGF-Key-0 = 0 */
     sgx_ec256_public_t      pub_key;                /* ( 8) ECDSA public key of the Enclave Signing Key White List Provider identified by WLProviderID */
     sgx_ec256_signature_t   signature;              /* (72) ECDSA Signature by WL Root CA identified by WLRootID */
 }wl_provider_cert_t;

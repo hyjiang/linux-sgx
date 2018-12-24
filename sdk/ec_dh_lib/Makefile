@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+# Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -37,7 +37,8 @@ CXXFLAGS += -Werror
 
 INCLUDE += -I$(COMMON_DIR)/inc/tlibc                          \
            -I$(COMMON_DIR)/inc/internal                       \
-           -I$(COMMON_DIR)/inc                                
+           -I$(COMMON_DIR)/inc                                \
+           -I../tlibcxx/include
 
 vpath %.cpp $(COMMON_DIR)/src
 
@@ -64,4 +65,6 @@ clean:
 	@$(RM) $(LIBNAME)
 
 .PHONY: rebuild
-rebuild: clean all
+rebuild:
+	$(MAKE) clean
+	$(MAKE) all

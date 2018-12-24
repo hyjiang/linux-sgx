@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+# Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -35,10 +35,10 @@ include buildenv.mk
 all: sdk psw
 
 psw: sdk
-	$(MAKE) -C psw/
+	$(MAKE) -C psw/ USE_OPT_LIBS=$(USE_OPT_LIBS)
 
 sdk:
-	$(MAKE) -C sdk/
+	$(MAKE) -C sdk/ USE_OPT_LIBS=$(USE_OPT_LIBS)
 
 # Generate SE SDK Install package
 sdk_install_pkg: sdk
@@ -47,10 +47,31 @@ sdk_install_pkg: sdk
 psw_install_pkg: psw
 	./linux/installer/bin/build-installpkg.sh psw
 
+deb_sgx_urts_pkg: psw
+	./linux/installer/deb/libsgx-urts/build.sh
+
+deb_sgx_enclave_common_pkg: psw
+	./linux/installer/deb/libsgx-enclave-common/build.sh
+
+deb_sgx_enclave_common_dev_pkg:
+	./linux/installer/deb/libsgx-enclave-common-dev/build.sh
+
+deb_pkg: deb_sgx_urts_pkg deb_sgx_enclave_common_pkg deb_sgx_enclave_common_dev_pkg
+	@$(RM) -f ./linux/installer/deb/*.deb ./linux/installer/deb/*.ddeb
+	cp `find ./linux/installer/deb/ -name "*.deb" -o -name "*.ddeb"` ./linux/installer/deb/
+
 clean:
 	@$(MAKE) -C sdk/                                clean
 	@$(MAKE) -C psw/                                clean
 	@$(RM)   -r $(ROOT_DIR)/build
 	@$(RM)   -r linux/installer/bin/sgx_linux*.bin
+	@$(RM)   -rf linux/installer/common/psw/output
+	@$(RM)   -rf linux/installer/common/psw/gen_source.py
+	@$(RM)   -rf linux/installer/common/sdk/output
+	@$(RM)   -rf linux/installer/common/sdk/pkgconfig/x64
+	@$(RM)   -rf linux/installer/common/sdk/pkgconfig/x86
+	@$(RM)   -rf linux/installer/common/sdk/gen_source.py
 
-rebuild: clean all
+rebuild:
+	$(MAKE) clean
+	$(MAKE) all

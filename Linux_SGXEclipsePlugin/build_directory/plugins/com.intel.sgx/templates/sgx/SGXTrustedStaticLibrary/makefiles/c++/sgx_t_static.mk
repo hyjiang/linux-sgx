@@ -1,7 +1,8 @@
-######## SGX SDK Settings ########
+######## Intel(R) SGX SDK Settings ########
 SGX_SDK ?= $(SdkPathFromPlugin)
 SGX_MODE ?= SIM
 SGX_ARCH ?= x64
+TRUSTED_DIR=static_trusted
 
 ifeq ($(shell getconf LONG_BIT), 32)
 	SGX_ARCH := x86
@@ -43,9 +44,9 @@ endif
 
 Crypto_Library_Name := sgx_tcrypto
 
-$(EnclaveName)_Cpp_Files := static_trusted/$(enclaveName).cpp 
+$(EnclaveName)_Cpp_Files := $(TRUSTED_DIR)/$(enclaveName).cpp 
 $(EnclaveName)_C_Files := 
-$(EnclaveName)_Include_Paths := -IInclude -I$(EnclaveName) -I$(SGX_SDK)/include -I$(SGX_SDK)/include/tlibc -I$(SGX_SDK)/include/stlport
+$(EnclaveName)_Include_Paths := -IInclude -I$(EnclaveName) -I$(SGX_SDK)/include -I$(SGX_SDK)/include/tlibc -I$(SGX_SDK)/include/libcxx
 
 Flags_Just_For_C := -Wno-implicit-function-declaration -std=c11
 Common_C_Cpp_Flags := $(SGX_COMMON_CFLAGS) -nostdinc -fvisibility=hidden -fpie -fstack-protector $($(EnclaveName)_Include_Paths) -fno-builtin-printf -I.
@@ -56,7 +57,7 @@ $(EnclaveName)_Cpp_Flags := $($(EnclaveName)_Cpp_Flags)  -fno-builtin-printf
 
 $(EnclaveName)_Link_Flags := $(SGX_COMMON_CFLAGS) -Wl,--no-undefined -nostdlib -nodefaultlibs -nostartfiles -L$(SGX_LIBRARY_PATH) \
 	-Wl,--whole-archive -l$(Trts_Library_Name) -Wl,--no-whole-archive \
-	-Wl,--start-group -lsgx_tstdc -lsgx_tstdcxx -l$(Crypto_Library_Name) -l$(Service_Library_Name) -Wl,--end-group \
+	-Wl,--start-group -lsgx_tstdc -lsgx_tcxx -l$(Crypto_Library_Name) -l$(Service_Library_Name) -Wl,--end-group \
 	-Wl,-Bstatic -Wl,-Bsymbolic -Wl,--no-undefined \
 	-Wl,-pie,-eenclave_entry -Wl,--export-dynamic  \
 	-Wl,--defsym,__ImageBase=0 \
@@ -77,29 +78,29 @@ endif
 
 .PHONY: all run
 
-all: $(enclaveName).sgx.static.lib.a
+all: lib$(enclaveName).sgx.static.lib.a
 
 ######## $(enclaveName) Objects ########
 
-static_trusted/$(enclaveName)_t.h: $(SGX_EDGER8R) ./static_trusted/$(enclaveName).edl
-	@cd ./static_trusted && $(SGX_EDGER8R) --header-only  --trusted ../static_trusted/$(enclaveName).edl --search-path ../static_trusted --search-path $(SGX_SDK)/include
+$(TRUSTED_DIR)/$(enclaveName)_t.h: $(SGX_EDGER8R) ./$(TRUSTED_DIR)/$(enclaveName).edl
+	@cd ./$(TRUSTED_DIR) && $(SGX_EDGER8R) --header-only  --trusted ../$(TRUSTED_DIR)/$(enclaveName).edl --search-path ../$(TRUSTED_DIR) --search-path $(SGX_SDK)/include
 	@echo "GEN  =>  $@"
 
-static_trusted/$(enclaveName)_t.o: ./trusted/$(enclaveName)_t.c
+$(TRUSTED_DIR)/$(enclaveName)_t.o: ./trusted/$(enclaveName)_t.c
 	@$(CC) $($(EnclaveName)_C_Flags) -c $< -o $@
 	@echo "CC   <=  $<"
 
-static_trusted/%.o: static_trusted/%.cpp
+$(TRUSTED_DIR)/%.o: $(TRUSTED_DIR)/%.cpp
 	@$(CXX) $($(EnclaveName)_Include_Paths) $($(EnclaveName)_Cpp_Flags) -c $< -o $@
 	@echo "CXX  <=  $<"
 
-static_trusted/%.o: static_trusted/%.c
+$(TRUSTED_DIR)/%.o: $(TRUSTED_DIR)/%.c
 	@$(CC) $($(EnclaveName)_C_Flags) -c $< -o $@
 	@echo "CC  <=  $<"
 
-$(enclaveName).sgx.static.lib.a: static_trusted/$(enclaveName)_t.h $($(EnclaveName)_Cpp_Objects) $($(EnclaveName)_C_Objects)
-	ar rcs $(enclaveName).sgx.static.lib.a $($(EnclaveName)_Cpp_Objects) $($(EnclaveName)_C_Objects)  
+lib$(enclaveName).sgx.static.lib.a: $(TRUSTED_DIR)/$(enclaveName)_t.h $($(EnclaveName)_Cpp_Objects) $($(EnclaveName)_C_Objects)
+	ar rcs lib$(enclaveName).sgx.static.lib.a $($(EnclaveName)_Cpp_Objects) $($(EnclaveName)_C_Objects)  
 	@echo "LINK =>  $@"
 
 clean:
-	@rm -f $(enclaveName).* static_trusted/$(enclaveName)_t.* $($(EnclaveName)_Cpp_Objects) $($(EnclaveName)_C_Objects)
+	@rm -f lib$(enclaveName).* $(TRUSTED_DIR)/$(enclaveName)_t.* $($(EnclaveName)_Cpp_Objects) $($(EnclaveName)_C_Objects)

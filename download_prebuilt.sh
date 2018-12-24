@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+# Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -32,11 +32,48 @@
 
 
 top_dir=`dirname $0`
-out_dir=$top_dir/psw/ae/data/prebuilt
-server_url=https://01.org/sites/default/files/downloads/intelr-software-guard-extensions-linux-os/sgxprebuilt-1.5.80.27216.tar
-wget $server_url -P $out_dir
+out_dir=$top_dir
+optlib_name=optimized_libs_2.4.tar.gz
+ae_file_name=prebuilt_ae_2.4.tar.gz
+checksum_file=SHA256SUM_prebuilt_2.4.txt
+server_url_path=https://download.01.org/intel-sgx/linux-2.4/
+server_optlib_url=$server_url_path/$optlib_name
+server_ae_url=$server_url_path/$ae_file_name
+server_checksum_url=$server_url_path/$checksum_file
+
+rm -f $out_dir/$optlib_name
+wget $server_optlib_url -P $out_dir
 if [ $? -ne 0 ]; then
-    echo "Fail to download file $server_url"
+    echo "Fail to download file $server_optlib_url"
     exit -1
 fi
-pushd $out_dir;tar -xf sgxprebuilt-1.5.80.27216.tar;rm -rf sgxprebuilt-1.5.80.27216.tar;popd
+
+rm -f $out_dir/$ae_file_name
+wget $server_ae_url -P $out_dir
+if [ $? -ne 0 ]; then
+    echo "Fail to download file $server_ae_url"
+    exit -1
+fi
+
+rm -f $out_dir/$checksum_file
+wget $server_checksum_url -P $out_dir
+if [ $? -ne 0 ]; then
+    echo "Fail to download file $server_checksum_url"
+    exit -1
+fi
+
+
+pushd $out_dir
+
+sha256sum -c $checksum_file
+if [ $? -ne 0 ]; then
+    echo "Checksum verification failure"
+    exit -1
+fi
+tar -zxf $optlib_name
+tar -zxf $ae_file_name
+rm -f $optlib_name
+rm -f $ae_file_name
+rm -f $checksum_file
+
+popd

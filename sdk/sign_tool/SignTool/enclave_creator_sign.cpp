@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -40,7 +40,6 @@
 #include "enclave_creator.h"
 #include "sgx_eid.h"
 #include "enclave_creator_sign.h"
-#include "ipp_wrapper.h"
 #include "se_trace.h"
 #include "sgx_error.h"
 #include "util_st.h"
@@ -50,6 +49,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <openssl/err.h>
 
 #define DATA_BLOCK_SIZE 64
 #define EID             0x44444444
@@ -60,11 +60,13 @@ EnclaveCreatorST::EnclaveCreatorST()
     memset(m_enclave_hash, 0, SGX_HASH_SIZE);
     m_ctx = NULL;
     m_eid = EID;
+    m_quota = 0;
 }
 
 EnclaveCreatorST::~EnclaveCreatorST()
 {
-    SAFE_FREE_MM(m_ctx);
+    if(m_ctx)
+        EVP_MD_CTX_destroy(m_ctx);
 }
 
 int EnclaveCreatorST::create_enclave(secs_t *secs, sgx_enclave_id_t *enclave_id, void **start_addr, bool ae)
@@ -76,27 +78,19 @@ int EnclaveCreatorST::create_enclave(secs_t *secs, sgx_enclave_id_t *enclave_id,
     }
 
     UNUSED(ae);
-
+    
     memset(m_enclave_hash, 0, SGX_HASH_SIZE);
-    int size_in_byte = 0;
-    IppStatus error_code = ippsHashGetSize(&size_in_byte);
-    if(error_code != ippStsNoErr)
+    if((m_ctx = EVP_MD_CTX_create()) == NULL)
     {
-        se_trace(SE_TRACE_DEBUG, "ERROR:ippsHashGetSize() failed in the enclave measurement process.\n");
+        se_trace(SE_TRACE_DEBUG, "ERROR - EVP_MD_CTX_create: %s.\n", ERR_error_string(ERR_get_error(), NULL));
         return SGX_ERROR_UNEXPECTED;
     }
-    m_ctx = (IppsHashState *)malloc(size_in_byte);
-    if(m_ctx == NULL)
+    if(EVP_DigestInit_ex(m_ctx, EVP_sha256(), NULL) != 1)
     {
-        se_trace(SE_TRACE_ERROR, NO_MEMORY_ERROR);
-        return SGX_ERROR_OUT_OF_MEMORY;
-    }
-    error_code = ippsHashInit(m_ctx, IPP_ALG_HASH_SHA256); 
-    if(error_code != ippStsNoErr)
-    {
-        se_trace(SE_TRACE_DEBUG, "ERROR:ippsHashInit() failed in the enclave measurement process.\n");
+        se_trace(SE_TRACE_DEBUG, "ERROR - EVP_DigestInit_ex: %s.\n", ERR_error_string(ERR_get_error(), NULL));
         return SGX_ERROR_UNEXPECTED;
     }
+
     uint8_t ecreat_val[SIZE_NAMED_VALUE] = "ECREATE";
 
     uint8_t data_block[DATA_BLOCK_SIZE];
@@ -107,10 +101,10 @@ int EnclaveCreatorST::create_enclave(secs_t *secs, sgx_enclave_id_t *enclave_id,
     memcpy_s(&data_block[offset], sizeof(data_block)-offset, &secs->ssa_frame_size, sizeof(secs->ssa_frame_size));
     offset += sizeof(secs->ssa_frame_size);
     memcpy_s(&data_block[offset], sizeof(data_block)-offset, &secs->size, sizeof(secs->size));
-    error_code = ippsHashUpdate((Ipp8u *)&data_block, DATA_BLOCK_SIZE, m_ctx);
-    if(error_code != ippStsNoErr)
+
+    if(EVP_DigestUpdate(m_ctx, &data_block, DATA_BLOCK_SIZE) != 1)
     {
-        se_trace(SE_TRACE_DEBUG, "ERROR:ippsHashUpdate() failed in the enclave measurement(ECREATE) process.\n");
+        se_trace(SE_TRACE_DEBUG, "ERROR - EVP_DigestUpdate: %s.\n", ERR_error_string(ERR_get_error(), NULL));
         return SGX_ERROR_UNEXPECTED;
     }
 
@@ -142,10 +136,10 @@ int EnclaveCreatorST::add_enclave_page(sgx_enclave_id_t enclave_id, void *src, u
         return SGX_ERROR_UNEXPECTED;
     }
 
-    /* Check the page attributes: must be ADD only or ADD+EXTEND */
-    if (!(attr & (ADD_PAGE_ONLY)) || (attr & (~(ADD_EXTEND_PAGE))))
+    //check the page attributes
+    if (!(attr & PAGE_ATTR_EADD))
     {
-        return SGX_ERROR_UNEXPECTED;
+        return SGX_SUCCESS;
     }
 
     uint64_t page_offset = (uint64_t)offset;
@@ -159,10 +153,9 @@ int EnclaveCreatorST::add_enclave_page(sgx_enclave_id_t enclave_id, void *src, u
     memcpy_s(data_block+db_offset, sizeof(data_block)-db_offset, &page_offset, sizeof(page_offset));
     db_offset += sizeof(page_offset);
     memcpy_s(data_block+db_offset, sizeof(data_block)-db_offset, &sinfo, sizeof(data_block)-db_offset);
-    IppStatus error_code = ippsHashUpdate((Ipp8u *)&data_block, DATA_BLOCK_SIZE, m_ctx);
-    if(error_code != ippStsNoErr)
+    if(EVP_DigestUpdate(m_ctx, data_block, DATA_BLOCK_SIZE) != 1)
     {
-        se_trace(SE_TRACE_DEBUG, "ERROR::ippsHashUpdate() failed in the enclave measurement(EADD) process.\n");
+        se_trace(SE_TRACE_DEBUG, "ERROR - EVP_digestUpdate: %s.\n", ERR_error_string(ERR_get_error(), NULL));
         return SGX_ERROR_UNEXPECTED;
     }
 
@@ -180,21 +173,18 @@ int EnclaveCreatorST::add_enclave_page(sgx_enclave_id_t enclave_id, void *src, u
             memcpy_s(data_block, sizeof(data_block), eextend_val, SIZE_NAMED_VALUE);
             db_offset += SIZE_NAMED_VALUE;
             memcpy_s(data_block+db_offset, sizeof(data_block)-db_offset, &page_offset, sizeof(page_offset));
-
-            error_code = ippsHashUpdate((Ipp8u *)&data_block, DATA_BLOCK_SIZE, m_ctx);
-            if(error_code != ippStsNoErr)
+            if(EVP_DigestUpdate(m_ctx, data_block, DATA_BLOCK_SIZE) != 1)
             {
-                se_trace(SE_TRACE_DEBUG, "ERROR:ippsHashUpdate() failed in the enclave measurement(EEXTEND) process.\n");
+                se_trace(SE_TRACE_DEBUG, "ERROR - EVP_digestUpdate: %s.\n", ERR_error_string(ERR_get_error(), NULL));
                 return SGX_ERROR_UNEXPECTED;
             }
 
             for(int j = 0; j < EEXTEND_TIME; j++)
             {
                 memcpy_s(data_block, sizeof(data_block), pdata, DATA_BLOCK_SIZE);
-                error_code = ippsHashUpdate((Ipp8u *)&data_block, DATA_BLOCK_SIZE, m_ctx);
-                if(error_code != ippStsNoErr)
+                if(EVP_DigestUpdate(m_ctx, data_block, DATA_BLOCK_SIZE) != 1)
                 {
-                    se_trace(SE_TRACE_DEBUG, "ERROR:ippsHashUpdate() failed in the enclave measurement(EEXTEND) process.\n");
+                    se_trace(SE_TRACE_DEBUG, "ERROR - EVP_digestUpdate: %s.\n", ERR_error_string(ERR_get_error(), NULL));
                     return SGX_ERROR_UNEXPECTED;
                 }
                 pdata += DATA_BLOCK_SIZE;
@@ -202,6 +192,8 @@ int EnclaveCreatorST::add_enclave_page(sgx_enclave_id_t enclave_id, void *src, u
             }
         }
     }
+
+    m_quota += SE_PAGE_SIZE;
     return SGX_SUCCESS;
 }
 
@@ -212,12 +204,12 @@ int EnclaveCreatorST::init_enclave(sgx_enclave_id_t enclave_id, enclave_css_t *e
 
     uint8_t temp_hash[SGX_HASH_SIZE];
     memset(temp_hash, 0, SGX_HASH_SIZE);
+    unsigned int hash_len;
 
     /* Complete computation of the SHA256 digest and store the result into the hash. */
-    IppStatus  error_code = ippsHashFinal((Ipp8u *)temp_hash, m_ctx);
-    if(error_code != ippStsNoErr)
+    if(EVP_DigestFinal_ex(m_ctx, temp_hash, &hash_len) != 1)
     {
-        se_trace(SE_TRACE_DEBUG, "ERROR:ippsHashFinal() failed in the enclave measurement process.\n");
+        se_trace(SE_TRACE_DEBUG, "ERROR - EVP_digestFinal_ex: %s.\n", ERR_error_string(ERR_get_error(), NULL));
         return SGX_ERROR_UNEXPECTED;
     }
 
@@ -236,10 +228,14 @@ int EnclaveCreatorST::get_misc_attr(sgx_misc_attribute_t *sgx_misc_attr, metadat
     return SGX_SUCCESS;
 }
 
-int EnclaveCreatorST::destroy_enclave(sgx_enclave_id_t enclave_id)
+int EnclaveCreatorST::destroy_enclave(sgx_enclave_id_t enclave_id, uint64_t enclave_size)
 {
     UNUSED(enclave_id);
-    SAFE_FREE_MM(m_ctx);
+    UNUSED(enclave_size);
+    if(m_ctx){
+        EVP_MD_CTX_destroy(m_ctx);
+        m_ctx = NULL;
+    }
     return SGX_SUCCESS;
 }
 
@@ -260,7 +256,23 @@ bool EnclaveCreatorST::use_se_hw() const
     return false;
 }
 
-int EnclaveCreatorST::get_enclave_info(uint8_t *hash, int size)
+bool EnclaveCreatorST::is_EDMM_supported(sgx_enclave_id_t enclave_id)
+{
+    UNUSED(enclave_id);
+    return false;
+}
+
+bool EnclaveCreatorST::is_driver_compatible()
+{
+    return true;
+}
+
+bool EnclaveCreatorST::is_in_kernel_driver()
+{
+    return false;
+}
+
+int EnclaveCreatorST::get_enclave_info(uint8_t *hash, int size, uint64_t *quota)
 {
     if(hash == NULL || size != SGX_HASH_SIZE || m_hash_valid_flag == false)
     {
@@ -271,6 +283,47 @@ int EnclaveCreatorST::get_enclave_info(uint8_t *hash, int size)
     {
         memcpy_s(hash, size, m_enclave_hash, SGX_HASH_SIZE);
     }
+    *quota = m_quota;
+    return SGX_SUCCESS;
+}
+
+int EnclaveCreatorST::emodpr(uint64_t addr, uint64_t size, uint64_t flag)
+{
+    UNUSED(addr);
+    UNUSED(size);
+    UNUSED(flag);
+
+    return SGX_SUCCESS;
+}
+
+int EnclaveCreatorST::mktcs(uint64_t tcs_addr)
+{
+    UNUSED(tcs_addr);
+
+    return SGX_SUCCESS;
+}
+
+int EnclaveCreatorST::trim_range(uint64_t fromaddr, uint64_t toaddr)
+{
+    UNUSED(fromaddr);
+    UNUSED(toaddr);
+
+    return SGX_SUCCESS;
+
+}
+
+int EnclaveCreatorST::trim_accept(uint64_t addr)
+{
+    UNUSED(addr);
+
+    return SGX_SUCCESS;
+}
+
+int EnclaveCreatorST::remove_range(uint64_t fromaddr, uint64_t numpages)
+{
+    UNUSED(fromaddr);
+    UNUSED(numpages);
+
     return SGX_SUCCESS;
 }
 

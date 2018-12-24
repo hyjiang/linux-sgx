@@ -1,5 +1,5 @@
 ///////////////////////////////////////////////////////////////////////////
-// Copyright (c) 2016 Intel Corporation.				 //
+// Copyright (c) 2018 Intel Corporation.				 //
 // 									 //
 // All rights reserved. This program and the accompanying materials	 //
 // are made available under the terms of the Eclipse Public License v1.0 //
@@ -82,7 +82,7 @@ public abstract class TwoStepSignHandlerBase extends SGXHandler {
 	void initializeSigntool() throws ErrorException {
 		signtool = PreferenceConstants.getSDKDescriptor().getSignerPath();
 		if (!signtool.exists() || signtool.isDirectory()) {
-			quitWithError("Error generating hash! Sign Tool Not Found !\n Please make sure to have written in the box the value for  SGX SDK Directory in Window->Preferences->SGX Preferences. \n Usually the path is in /opt/intel/sgxsdk/" );
+			quitWithError("Error generating hash! Sign Tool Not Found !\n Please make sure to have written in the box the value for  Intel(R) SGX SDK Directory in Window->Preferences->Intel(R) SGX Preferences. \n Usually the path is in /opt/intel/sgxsdk/" );
 		}
 
 	}

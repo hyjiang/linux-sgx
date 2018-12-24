@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -71,7 +71,8 @@ typedef struct _secu_info{
     uint32_t reserved;       /* MBZ */
     uint32_t psda_id;        /* must be hardcoded value - 1 */
     uint32_t psda_svn;       /* from PSE-CSE pairing blob */
-    uint8_t  reserved2[76];  /* MBZ */
+    uint8_t  reserved2[74];  /* MBZ */
+    uint16_t session_prop;
 }secu_info_t;
 
 typedef struct _pse_dh_msg3_t
@@ -101,7 +102,7 @@ typedef struct _pse_dh_msg3_t
 #define MC_POLICY_ENCLAVE 0x2
 
 #define PAYLOAD_IV_SIZE   12
-typedef struct _pse_msssage_t
+typedef struct _pse_message_t
 {
     uint32_t session_id;
     uint32_t exp_resp_size;                      /* 0: response message*/
@@ -145,6 +146,8 @@ typedef enum _pse_op_error_t
     OP_ERROR_DATABASE_FATAL,                    /*  Fatal error returned when opening VMC DB, Should re-initialize DB  */
     OP_ERROR_SQLITE_NOT_FOUND,                  /*  Record not found. */
     OP_ERROR_CACHE_MISS,                        /*  The related nodes of a leaf node are not cached */
+    OP_ERROR_KDF_MISMATCH,                      /*  Key derivation function doesn't match during exchange report */
+    OP_ERROR_LTPB_SEALING_OUT_OF_DATE,          /*  The ISV SVN in the LTP blob doesn't match PSE ISV SVN */
 }pse_op_error_t;
 
 typedef enum _pse_service_resp_status_t
@@ -270,10 +273,14 @@ typedef struct _pse_timer_read_resp_t
 #define PSDA_MSG_TYPE_CAP_RESULT    1
 #define PSDA_MSG_TYPE_CERT_INFO_QUERY       2
 #define PSDA_MSG_TYPE_CERT_INFO_RESULT      3
-#define PSDA_MSG_TYPE_LT_M1         0
-#define PSDA_MSG_TYPE_LT_M2         1
-#define PSDA_MSG_TYPE_LT_M7         2
-#define PSDA_MSG_TYPE_LT_M8         3
+#define PSDA_MSG_TYPE_LT_M1_11      0
+#define PSDA_MSG_TYPE_LT_M2_11      1
+#define PSDA_MSG_TYPE_LT_M7_11      2
+#define PSDA_MSG_TYPE_LT_M8_11      3
+#define PSDA_MSG_TYPE_LT_M1_20      4
+#define PSDA_MSG_TYPE_LT_M2_20      5
+#define PSDA_MSG_TYPE_LT_M7_20      6
+#define PSDA_MSG_TYPE_LT_M8_20      7
 #define PSDA_MSG_TYPE_EP_M1         0
 #define PSDA_MSG_TYPE_EP_M2         1
 #define PSDA_MSG_TYPE_EP_M3         2

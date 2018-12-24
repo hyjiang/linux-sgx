@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2016 Intel Corporation. All rights reserved.
+ * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -32,19 +32,58 @@
 
 #include "sgx_error.h"
 #include "sgx_urts.h"
+#include "sgx_uswitchless.h"
 #include "se_types.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 
 #include "urts_com.h"
-extern "C" sgx_status_t sgx_create_enclave(const char *file_name, const int debug, sgx_launch_token_t *launch_token, int *launch_token_updated, sgx_enclave_id_t *enclave_id, sgx_misc_attribute_t *misc_attr)
+
+static bool inline _check_ex_params_(const uint32_t ex_features, const void* ex_features_p[32])
+{
+    //update last feature index if it fails here
+    se_static_assert(_SGX_LAST_EX_FEATURE_IDX_ == SGX_CREATE_ENCLAVE_EX_KSS_BIT_IDX);
+    
+    uint32_t i;
+
+    if (ex_features_p != NULL)
+    {
+        for (i = 0; i <= _SGX_LAST_EX_FEATURE_IDX_; i++)
+        {
+            if (((ex_features & (1<<i)) == 0) && (ex_features_p[i] != NULL))
+                return false;
+        }
+
+        for (i = _SGX_LAST_EX_FEATURE_IDX_ + 1; i < MAX_EX_FEATURES_COUNT; i++)
+        {
+            if (ex_features_p[i] != NULL)
+                return false;
+        }
+    }
+    
+    return ((ex_features | _SGX_EX_FEATURES_MASK_) == _SGX_EX_FEATURES_MASK_);
+}
+
+extern "C" sgx_status_t __sgx_create_enclave_ex(const char *file_name, 
+                                                const int debug, 
+                                                sgx_launch_token_t *launch_token, 
+                                                int *launch_token_updated, 
+                                                sgx_enclave_id_t *enclave_id, 
+                                                sgx_misc_attribute_t *misc_attr,
+                                                const uint32_t ex_features,
+                                                const void* ex_features_p[32])
 {
     sgx_status_t ret = SGX_SUCCESS;
 
-    //Only true or flase is valid
+    //Only true or false is valid
     if(TRUE != debug &&  FALSE != debug)
         return SGX_ERROR_INVALID_PARAMETER;
+
+    if (!_check_ex_params_(ex_features, ex_features_p))
+    {
+        return SGX_ERROR_INVALID_PARAMETER;
+    }
 
     int fd = open(file_name, O_RDONLY);
     if(-1 == fd)
@@ -57,8 +96,112 @@ extern "C" sgx_status_t sgx_create_enclave(const char *file_name, const int debu
     file.name = realpath(file_name, resolved_path);
     file.name_len = (uint32_t)strlen(resolved_path);
 
-    ret = _create_enclave(!!debug, fd, file, NULL, launch_token, launch_token_updated, enclave_id, misc_attr);
+    ret = _create_enclave_ex(!!debug, fd, file, NULL, launch_token, launch_token_updated, enclave_id, misc_attr, ex_features, ex_features_p);
+    if(SGX_SUCCESS != ret && misc_attr)
+    {
+        sgx_misc_attribute_t plat_cap;
+        memset(&plat_cap, 0, sizeof(plat_cap));
+        get_enclave_creator()->get_plat_cap(&plat_cap);
+        memcpy_s(misc_attr, sizeof(sgx_misc_attribute_t), &plat_cap, sizeof(sgx_misc_attribute_t));
+    }
+
     close(fd);
 
     return ret;
 }
+
+extern "C" sgx_status_t sgx_create_enclave(const char *file_name, 
+                                           const int debug, 
+                                           sgx_launch_token_t *launch_token, 
+                                           int *launch_token_updated, 
+                                           sgx_enclave_id_t *enclave_id, 
+                                           sgx_misc_attribute_t *misc_attr) 
+{
+    return __sgx_create_enclave_ex(file_name, debug, launch_token, launch_token_updated, enclave_id, misc_attr, 0, NULL);
+}
+
+extern "C"  sgx_status_t sgx_create_enclave_ex(const char *file_name,
+                                               const int debug,
+                                               sgx_launch_token_t *launch_token,
+                                               int *launch_token_updated,
+                                               sgx_enclave_id_t *enclave_id,
+                                               sgx_misc_attribute_t *misc_attr,
+                                               const uint32_t ex_features,
+                                               const void* ex_features_p[32])
+{
+
+    return __sgx_create_enclave_ex(file_name, debug, launch_token,
+        launch_token_updated, enclave_id, misc_attr, ex_features, ex_features_p);
+}
+
+extern "C" sgx_status_t sgx_get_target_info(
+	const sgx_enclave_id_t enclave_id,
+	sgx_target_info_t* target_info)
+{
+    if (!target_info)
+        return SGX_ERROR_INVALID_PARAMETER;
+
+    CEnclave* enclave = CEnclavePool::instance()->get_enclave(enclave_id);
+    if (!enclave) {
+        return SGX_ERROR_INVALID_ENCLAVE_ID;
+    }
+    *target_info = enclave->get_target_info();
+    return SGX_SUCCESS;
+}
+
+
+extern "C" sgx_status_t sgx_create_enclave_from_buffer_ex(uint8_t *buffer,
+                                                          uint64_t buffer_size,
+                                                          const int debug,
+                                                          sgx_enclave_id_t *enclave_id,
+                                                          sgx_misc_attribute_t *misc_attr,
+                                                          const uint32_t ex_features,
+                                                          const void* ex_features_p[32])
+{
+    sgx_status_t ret = SGX_SUCCESS;
+
+    // Only true or false is valid
+    if (TRUE != debug &&  FALSE != debug)
+    {
+        return SGX_ERROR_INVALID_PARAMETER;
+    }
+
+    if (!_check_ex_params_(ex_features, ex_features_p))
+    {
+        return SGX_ERROR_INVALID_PARAMETER;
+    }
+
+    se_file_t file = {NULL, 0, false};
+    ret = _create_enclave_from_buffer_ex(!!debug, buffer, buffer_size, file, NULL, enclave_id,
+		                         misc_attr, ex_features, ex_features_p);
+    if (SGX_SUCCESS != ret && misc_attr)
+    {
+        sgx_misc_attribute_t plat_cap;
+        memset(&plat_cap, 0, sizeof(plat_cap));
+        get_enclave_creator()->get_plat_cap(&plat_cap);
+        memcpy_s(misc_attr, sizeof(sgx_misc_attribute_t), &plat_cap,
+                 sizeof(sgx_misc_attribute_t));
+    }
+
+    return ret;
+}
+
+
+extern "C" sgx_status_t
+sgx_create_encrypted_enclave(
+    const char *file_name,
+    const int debug,
+    sgx_launch_token_t *launch_token,
+    int *launch_token_updated,
+    sgx_enclave_id_t *enclave_id,
+    sgx_misc_attribute_t *misc_attr,
+    uint8_t* sealed_key)
+{
+    uint32_t ex_features = SGX_CREATE_ENCLAVE_EX_PCL;
+    const void* ex_features_p[32] = { 0 };
+    ex_features_p[SGX_CREATE_ENCLAVE_EX_PCL_BIT_IDX] = (void*)sealed_key;
+
+    return __sgx_create_enclave_ex(file_name, debug, launch_token,
+        launch_token_updated, enclave_id, misc_attr, ex_features, ex_features_p);
+}
+

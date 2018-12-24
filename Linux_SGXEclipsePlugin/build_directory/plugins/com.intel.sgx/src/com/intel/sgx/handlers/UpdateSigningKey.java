@@ -1,5 +1,5 @@
 ///////////////////////////////////////////////////////////////////////////
-// Copyright (c) 2016 Intel Corporation.				 //
+// Copyright (c) 2018 Intel Corporation.				 //
 // 									 //
 // All rights reserved. This program and the accompanying materials	 //
 // are made available under the terms of the Eclipse Public License v1.0 //
@@ -65,7 +65,7 @@ public class UpdateSigningKey extends SGXHandler {
 			IPath destFile = Path.fromOSString(destinationKeyFile);
 			copyFile(sourceFile.toFile(), destFile.toFile());
 			refreshProject();
-			info("Update SGX Enclave Signing Key","copied \n'" + sourceKeyFile + "' into \n'" + destFile + "'");
+			info("Update Intel(R) SGX Enclave Signing Key","copied \n'" + sourceKeyFile + "' into \n'" + destFile + "'");
 		} else {
 			UpdateSignKeyDialog.regenerate = false;
 			try {
@@ -84,7 +84,7 @@ public class UpdateSigningKey extends SGXHandler {
 				}
 				project.refreshLocal(IResource.DEPTH_INFINITE, null);
 				if (q.exitValue() == 0){
-					info("Update SGX Enclave Signing Key","'"+destinationKeyFile+"'"+" was generated!");
+					info("Update Intel(R) SGX Enclave Signing Key","'"+destinationKeyFile+"'"+" was generated!");
 				} else {
 					quitWithError("Could not generate '"+destinationKeyFile+"'!!!");
 				}
